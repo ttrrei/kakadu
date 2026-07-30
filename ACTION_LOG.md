@@ -63,33 +63,39 @@
 
 ---
 
-### ADR-005: DbOperator 架构重构与 ODS 审计规范简化
+### ADR-005: DbOperator Minimalist Architecture Refactoring — Removing contracts.py & ODS Audit Specifications
 **Status**: Approved
 **Date**: 2026-07-30
 
-#### 1. 背景 (Context)
-早期重构的 `db_operator.py` 过于复杂，混入了动态 `MERGE INTO` SQL 生成、OCI Object Storage 备份上传以及复杂的 Mock 兼容逻辑，偏离了项目 "Thin-Edge, Thick-Core" 和 "Pure-INSERT" 的核心设计原则。
+#### 1. Background
+The earlier refactored `db_operator.py` was overly complex, mixing dynamic `MERGE INTO` SQL generation, OCI Object Storage backup uploads, and intricate Mock compatibility logic. Additionally, introducing a separate `contracts.py` for data validation and audit column injection increased inter-module coupling and repetitive boilerplate code, violating the project's "Thin-Edge, Thick-Core" and Minimalism principles.
 
-#### 2. 决策内容 (Decisions)
+#### 2. Decisions
 
-**ADR-005.1: 审计列简化 (Audit Columns)**
-- 所有 ODS 表仅统一保留 **`BATCH_ID`** (UUID v4) 和 **`LOAD_TIME`** (ISO-8601 字符串) 两个审计列。
-- 废弃 `SOURCE_SYSTEM` / `datasource` 字段，因为 ODS 采用一源一表设计，表名本身已明确数据源。
+**ADR-005.1: No Independent contracts.py Module**
+- Do not create a standalone `contracts.py` file.
+- Audit column injection (`BATCH_ID` + `LOAD_TIME`) and `VARCHAR2` text-safe conversion logic are encapsulated directly in the private `_prepare_records()` method within `db_operator.py`.
+- Scraper layer doesn't need to handle metadata enrichment — just submit raw `List[Dict]` to `DbOperator`, achieving "zero boilerplate" and single-point defense control.
 
-**ADR-005.2: OCI 备份解耦 (Backup Decoupling)**
-- 从 `DbOperator` 中彻底移除 OCI Object Storage 备份逻辑。
-- `DbOperator` 仅负责数据库连接池管理与 Pure-INSERT，备份与云同步由独立的备份模块处理。
+**ADR-005.2: Audit Column Simplification**
+- All ODS tables consistently retain only two audit columns: **`BATCH_ID`** (UUID v4 string) and **`LOAD_TIME`** (ISO-8601 string).
+- Completely remove `SOURCE_SYSTEM` / `datasource` fields. Since Kakadu ODS uses "one source, one table" design (e.g., `ODS_PRICE_OHLCV` belongs to Yahoo, `ODS_SHORT_POSITION` belongs to Shortman), table names inherently encode source information.
 
-**ADR-005.3: ODS Zero-Loss 存储原则 (Strict VARCHAR2)**
-- 7 个 ODS 表的所有业务列与审计列统一采用 `VARCHAR2` 存储，杜绝 Python 侧类型转换导致的落库异常。
+**ADR-005.3: OCI Backup Logic Decoupling**
+- Completely strip OCI Object Storage backup and file operation logic from `DbOperator`.
+- `DbOperator` focuses solely on Oracle connection pool management and pure-INSERT; cloud and local backups are handled by a standalone `backup_manager.py` module.
 
-**ADR-005.4: 统一批次接口设计 (Batch-First Standard Interface)**
-- 统一 DB 写入接口，接收扁平化的 `List[Dict[str, Any]]` 数据集。
-- 不论是单 Symbol 序列数据还是全市场大表矩阵，均直接利用 `cursor.executemany()` 进行 Batch Size (5~10) 小批量纯追加写入，严禁将批量数据集拆解为逐行复杂操作。
+**ADR-005.4: ODS Zero-Loss Storage Principle (Strict VARCHAR2)**
+- All business columns and audit columns across 7 ODS tables use `VARCHAR2` storage, avoiding type conversion errors during Python-to-DB writes; all data cleaning and type coercion is pushed down to PL/SQL.
 
-#### 3. 影响与后续 (Consequences)
-- 极大简化 `db_operator.py` 的代码复杂度，降低 VM 内存开销。
-- 下一步将根据此规范重新编写 `install_ods_tables.sql` DDL 脚本与极简版 `db_operator.py`。
+**ADR-005.5: Unified Batch-First Interface Design**
+- Expose a unified `insert_batch(table_name, records, batch_id=None)` interface externally.
+- Whether it's single Symbol multi-row OHLCV data or Shortman's large multi-row multi-column dataset, both accept `List[Dict[str, Any]]` directly.
+- Internally uses `cursor.executemany()` to batch-append writes by `BATCH_SIZE` (5~10); if batch fails, automatically degrades to single `cursor.execute()` writes, logs exceptions, and skips dirty data.
+
+#### 3. Consequences
+- Avoids over-engineering, eliminates standalone contract layer files, and keeps Python side extremely lightweight (Thin-Edge).
+- Next step: Write minimalist `db_operator.py` and DDL scripts `install_ods_tables.sql` for 7 ODS tables based on this ADR.
 
 ---
 
@@ -100,8 +106,9 @@
 2. **PL/SQL Performance Tuning**: Optimize indicator computation queries for faster signal generation
 3. **Selenium Process Management**: Implement automated process cleanup between scheduled runs
 4. **Alert Threshold Calibration**: Fine-tune noise-suppressed alerting thresholds based on historical failure patterns
-5. **OCI Backup Module Design**: Design and implement standalone backup module for OCI Object Storage cloud sync (per ADR-005.2)
-6. **ODS DDL & DbOperator Rewrite**: Rewrite `install_ods_tables.sql` and simplify `db_operator.py` per ADR-005 specifications
+5. **Simplified db_operator.py**: Rewrite `db_operator.py` per ADR-005 — remove MERGE INTO logic, strip OCI backup code, consolidate audit injection into `_prepare_records()`, expose single `insert_batch()` interface
+6. **ODS DDL Scripts**: Rewrite `install_ods_tables.sql` per ADR-005 — 7 tables with only `BATCH_ID` + `LOAD_TIME` audit columns, all columns as `VARCHAR2`
+7. **backup_manager.py Design**: Design and implement standalone `backup_manager.py` module for OCI Object Storage and local backup per ADR-005.3
 
 ---
 
@@ -135,7 +142,7 @@ All original scope items remain active. No significant scope changes have been m
 ## Monitoring & Observability
 
 ### Current Monitoring Setup
-- [TODO] Define key performance indicators (KPPs) for system health
+- [TODO] Define key performance indicators (KPIs) for system health
 - [TODO] Establish alerting thresholds based on historical data
 - [TODO] Create dashboards for operational visibility
 
