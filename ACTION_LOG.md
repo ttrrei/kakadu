@@ -99,6 +99,44 @@ The earlier refactored `db_operator.py` was overly complex, mixing dynamic `MERG
 
 ---
 
+### ADR-006: Configuration Separation — config.yaml + .env
+**Status**: Proposed
+**Date**: 2026-07-30
+
+#### 1. Context
+Sensitive credentials (database passwords, API keys, Pushover tokens, Wallet paths) must be isolated from code to prevent accidental exposure via version control.
+
+#### 2. Decision
+
+**ADR-006.1: Dual-File Configuration**
+- **`config.yaml`**: Non-sensitive configuration (data source URLs, ODS table names, log levels, batch sizes, etc.)
+- **`.env`**: Sensitive credentials (database password, API keys, Pushover tokens, etc.)
+- **`.env.example`**: Template file with placeholder values for reference
+
+**ADR-006.2: Directory Structure**
+```
+kakadu/
+├── config.yaml
+├── .env           # gitignored
+└── .env.example   # committed, no real secrets
+```
+
+**ADR-006.3: Secrets Never in Version Control**
+- `.env` is explicitly excluded from Git via `.gitignore`
+- Only `.env.example` (with placeholders) is committed
+
+**ADR-006.4: config.py Loader**
+- Single `config.py` module reads both files
+- Uses `python-dotenv` for `.env` and `PyYAML` for `config.yaml`
+- Provides a unified config object to the rest of the application
+
+#### 3. Consequences
+- Sensitive credentials are fully isolated from codebase
+- Development team can share `.env.example` as a setup guide without security risk
+- Adds `python-dotenv` and `PyYAML` dependencies
+
+---
+
 ## Future Actions & Planned Improvements
 
 ### Priority Items
@@ -109,6 +147,7 @@ The earlier refactored `db_operator.py` was overly complex, mixing dynamic `MERG
 5. **Simplified db_operator.py**: Rewrite `db_operator.py` per ADR-005 — remove MERGE INTO logic, strip OCI backup code, consolidate audit injection into `_prepare_records()`, expose single `insert_batch()` interface
 6. **ODS DDL Scripts**: Rewrite `install_ods_tables.sql` per ADR-005 — 7 tables with only `BATCH_ID` + `LOAD_TIME` audit columns, all columns as `VARCHAR2`
 7. **backup_manager.py Design**: Design and implement standalone `backup_manager.py` module for OCI Object Storage and local backup per ADR-005.3
+8. **Dual-Config Implementation**: Create `config.yaml` + `.env` + `.env.example` per ADR-006, implement `config.py` loader, add `.gitignore` entry
 
 ---
 
