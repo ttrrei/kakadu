@@ -39,7 +39,7 @@ END;
 --    >>> EDIT "ChangeMe_Strong#2026" before executing <<<
 -- -----------------------------------------------------------------------------
 BEGIN
-  EXECUTE IMMEDIATE 'CREATE USER EQUITY IDENTIFIED BY "ChangeMe_Strong#2026"';
+  EXECUTE IMMEDIATE 'CREATE USER EQUITY IDENTIFIED BY "ChangeMe2026!"';
 EXCEPTION
   WHEN OTHERS THEN
     IF SQLCODE != -1920 THEN RAISE; END IF; -- ORA-01920: User already exists
@@ -115,7 +115,7 @@ END;
 
 -- Create index for fast lookup of a specific batch's progress
 BEGIN
-  EXECUTE IMMEDIATE 'CREATE INDEX IDX_SYS_BATCH_LOG_BID ON EQUITY.SYS_BATCH_LOG(BATCH_ID)';
+  EXECUTE IMMEDIATE 'CREATE INDEX EQUITY.IDX_SYS_BATCH_LOG_BID ON EQUITY.SYS_BATCH_LOG(BATCH_ID)';
 EXCEPTION
   WHEN OTHERS THEN
     IF SQLCODE != -955 THEN RAISE; END IF; 
