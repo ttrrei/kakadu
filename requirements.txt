@@ -1,0 +1,29 @@
+# Kakadu runtime dependencies.
+# Pinned for reproducible deploys on the VM.
+# Bump deliberately, then re-run `pytest test/` before deploying.
+
+# --- Core configuration & system ---
+python-dotenv==1.2.2
+PyYAML==6.0.2
+
+# --- Core ingestion & database ---
+oracledb==4.0.1
+requests==2.33.1
+
+# --- Cloud & Backup ---
+oci==2.128.0
+
+# --- HTML / data parsing & market data ---
+beautifulsoup4==4.15.0
+yfinance==1.4.1
+pandas==3.0.3
+
+# --- Selenium collectors (annc / list / consensus) ---
+selenium==4.45.0
+
+# --- Timezone data (AEST/AEDT via zoneinfo) ---
+tzdata>=2024.1
+
+# --- Test / dev only (safe to install on the VM; needed for `pytest test/`) ---
+pytest==9.1.1
+pytest-mock==3.15.1

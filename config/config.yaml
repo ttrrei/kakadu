@@ -1,0 +1,43 @@
+# ============================================
+# Kakadu - Non-Sensitive Configuration
+# ============================================
+
+# --- ODS Tables ---
+tables:
+  ohlcv: ODS_PRICE_OHLCV
+  tick: ODS_PRICE_TICK
+  quote_eav: ODS_PRICE_QUOTE_EAV
+  short_position: ODS_SHORT_POSITION
+  market_annc: ODS_MARKET_ANNC
+  company_master: ODS_COMPANY_MASTER
+  analyst_consensus: ODS_ANALYST_CONSENSUS
+
+# --- Data Sources ---
+sources:
+  yahoo:
+    base_url: https://query1.finance.yahoo.com
+    history_days: 60
+    interval: 1h
+  afr:
+    base_url: https://api.afr.com
+  asx:
+    base_url: https://www.asx.com.au
+  shortman:
+    base_url: https://api.shortman.com.au
+
+# --- Backup ---
+backup:
+  local_path: /home/ubuntu/backup
+  oci_enabled: true
+
+# --- Ingestion ---
+ingestion:
+  batch_size: 10
+  retry_attempts: 3
+  retry_delay_seconds: 5
+
+# --- Logging ---
+logging:
+  level: INFO
+  file_path: /home/ubuntu/logs/kakadu.log
+  rotation: daily
