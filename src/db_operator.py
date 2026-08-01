@@ -18,7 +18,7 @@ from typing import Any
 import oracledb
 
 # 导入新的配置加载类
-from config import EnvConfig
+from .config import EnvConfig
 
 logger = logging.getLogger(__name__)
 

@@ -23,6 +23,8 @@
 ### Current Issues
 1. **Network Glitch Tolerance**: Transient network failures during web scraping require retry logic and backup retention strategy
 2. **Selenium Process Management**: Chrome processes need cleanup after scheduled runs to prevent memory accumulation
+3. **DbOperator Thread Safety**: `db_operator.py` is currently not thread-safe.
+4. **Hardcoded Batch Size**: `BATCH_SIZE` is currently hardcoded and needs to be moved to `EnvConfig`.
 
 ### Resolved Issues
 - [TODO] Document previously resolved issues if any
@@ -137,6 +139,45 @@ kakadu/
 
 ---
 
+### ADR-007: Multi-Tiered Data Architecture
+**Status**: Approved
+**Date**: 2026-07-30
+
+#### 1. Background
+As the system evolves from simple data collection to complex signal generation, a flat database structure will lead to data quality issues, lack of traceability, and performance bottlenecks. A structured approach to the data lifecycle is required to decouple raw ingestion, business logic, and analytical consumption.
+
+#### 2. Decisions
+
+**ADR-007.1: Five-Layer Data Model**
+
+Implement a tiered architecture to ensure separation of concerns and data integrity across the following layers:
+
+1. **SYS (System)**:
+    - **Responsibility**: Core system management, including metadata, application configuration, execution logs, and scheduling states.
+    - **Examples**: `SYS_BATCH_LOG`, `SYS_CONFIG`.
+
+2. **ODS (Operational Data Store)**:
+    - **Responsibility**: Raw data landing zone. Acts as a "Pure" mirror of external systems, preserving original formats to ensure full data lineage and allow for reprocessing.
+    - **Examples**: `ODS_YAHOO_HISTORY`.
+
+3. **REF (Reference)**:
+    - **Responsibility**: Static lookup layer containing master data, dictionaries, mapping tables, and system parameters.
+    - **Examples**: `REF_TICKER_MASTER`, `REF_SECTOR_MAP`.
+
+4. **BDI (Business Digital Image)**:
+    - **Responsibility**: The intermediate processing layer (similar to DWD). Cleans, standardizes, and deduplicates ODS data to create a consistent and "clean" digital representation of business entities.
+    - **Examples**: `BDI_EQUITY_PRICE_CLEANED`.
+
+5. **DMT (Data Mart)**:
+    - **Responsibility**: The application/presentation layer. Performs aggregations and technical indicator computations based on BDI data, optimized for direct consumption by APIs, signals, and reports.
+    - **Examples**: `DMT_SENSITIVE_INDICATORS`, `DMT_MONTHLY_SUMMARY`.
+
+#### 3. Consequences
+- **Pros**: High data traceability (from DMT back to ODS); improved data quality through the BDI layer; optimized performance by separating raw storage from analytical workloads.
+- **Cons**: Increased complexity in ETL/ELT orchestration and a higher number of managed database objects.
+
+---
+
 ## Future Actions & Planned Improvements
 
 ### Priority Items
@@ -148,6 +189,7 @@ kakadu/
 6. **ODS DDL Scripts**: Rewrite `install_ods_tables.sql` per ADR-005 — 7 tables with only `BATCH_ID` + `LOAD_TIME` audit columns, all columns as `VARCHAR2`
 7. **backup_manager.py Design**: Design and implement standalone `backup_manager.py` module for OCI Object Storage and local backup per ADR-005.3
 8. **Dual-Config Implementation**: Create `config.yaml` + `.env` + `.env.example` per ADR-006, implement `config.py` loader, add `.gitignore` entry
+9. **Multi-Tier ETL Pipeline**: Implement ETL/ELT orchestration for SYS, ODS, REF, BDI, DMT layers per ADR-007
 
 ---
 
