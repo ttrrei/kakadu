@@ -31,7 +31,7 @@
 ---
 
 ## 4. ODS Domain Data Model
-Adopts standardized naming driven by data domains and business entities. Business columns consistently use `VARCHAR2` (zero-loss principle), with audit columns `LOAD_TIME`, `SOURCE_SYSTEM`, and `BATCH_ID` uniformly injected:
+Adopts standardized naming driven by data domains and business entities. Business columns consistently use `VARCHAR2` (zero-loss principle), with audit columns `LOAD_TIME`, and `BATCH_ID` uniformly injected:
 
 | ODS Table Name | Business Domain & Purpose | Primary Key |
 | :--- | :--- | :--- |
