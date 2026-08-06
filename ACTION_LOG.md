@@ -178,6 +178,34 @@ Implement a tiered architecture to ensure separation of concerns and data integr
 
 ---
 
+### ADR-008: Task-Based Scraper Orchestration Architecture
+**Status**: Approved
+**Date**: 2024-05-22 (请根据实际日期修改)
+**Context**: The system requires multiple data ingestion tasks with varying execution patterns: some are "Bulk" (fetching all symbols in one page) and some are "Iterative" (fetching each symbol individually). Hardcoding these patterns in `main.py` leads to repetitive boilerplate, fragile error handling, and high maintenance overhead.
+
+**Decision**: Implement a "Template Method" pattern via a `BaseScraper` abstract class to decouple the *execution orchestration* from the *extraction logic*.
+
+**ADR-008.1: Unified Task Interface**
+- All scrapers must inherit from `BaseScraper`.
+- The `main.py` dispatcher interacts only with the `.run()` method, remaining agnostic to the internal scraping strategy.
+
+**ADR-008.2: Dual-Mode Execution Strategy**
+- **Bulk Mode (`is_bulk_task = True`)**: Executes `scrape_all()`. Optimized for high-density pages. Data is collected in one pass and submitted to `DbOperator` in a single batch.
+- **Iterative Mode (`is_bulk_task = False`)**: Executes `scrape_one()` within a loop. Optimized for detail pages. Implements a "Fetch $\rightarrow$ Buffer $\rightarrow$ Flush" cycle to minimize DB round-trips while keeping memory footprint low.
+
+**ADR-008.3: Isolation & Robustness (The "Shield" Pattern)**
+- In Iterative Mode, each `scrape_one()` call is wrapped in an independent `try-except` block.
+- Failure of a single symbol must not terminate the entire job. Errors are logged, and the system immediately proceeds to the next symbol to ensure maximum data yield.
+
+**ADR-008.4: Resource-Conscious Buffering**
+- To prevent OOM (Out of Memory) on the 1GB VM, Iterative Mode must use a configurable `BATCH_SIZE` (e.g., 50 records). The buffer is flushed to the database periodically, ensuring memory usage remains flat regardless of the total symbol count.
+
+**Consequences**:
+- **Pros**: Extreme reduction in `main.py` complexity; standardized error handling across all sources; easy extensibility for new data sources; optimized DB performance via balanced batching.
+- **Cons**: Slight increase in initial abstraction complexity (introduction of base classes).
+
+---
+
 ## Future Actions & Planned Improvements
 
 ### Priority Items
