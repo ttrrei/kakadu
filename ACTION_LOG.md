@@ -141,7 +141,7 @@ kakadu/
 
 ### ADR-007: Multi-Tiered Data Architecture
 **Status**: Approved
-**Date**: 2026-07-30
+**Date**: 2026-08-02
 
 #### 1. Background
 As the system evolves from simple data collection to complex signal generation, a flat database structure will lead to data quality issues, lack of traceability, and performance bottlenecks. A structured approach to the data lifecycle is required to decouple raw ingestion, business logic, and analytical consumption.
@@ -180,7 +180,7 @@ Implement a tiered architecture to ensure separation of concerns and data integr
 
 ### ADR-008: Task-Based Scraper Orchestration Architecture
 **Status**: Approved
-**Date**: 2024-05-22 (请根据实际日期修改)
+**Date**: 2026-08-06
 **Context**: The system requires multiple data ingestion tasks with varying execution patterns: some are "Bulk" (fetching all symbols in one page) and some are "Iterative" (fetching each symbol individually). Hardcoding these patterns in `main.py` leads to repetitive boilerplate, fragile error handling, and high maintenance overhead.
 
 **Decision**: Implement a "Template Method" pattern via a `BaseScraper` abstract class to decouple the *execution orchestration* from the *extraction logic*.
@@ -191,7 +191,7 @@ Implement a tiered architecture to ensure separation of concerns and data integr
 
 **ADR-008.2: Dual-Mode Execution Strategy**
 - **Bulk Mode (`is_bulk_task = True`)**: Executes `scrape_all()`. Optimized for high-density pages. Data is collected in one pass and submitted to `DbOperator` in a single batch.
-- **Iterative Mode (`is_bulk_task = False`)**: Executes `scrape_one()` within a loop. Optimized for detail pages. Implements a "Fetch $\rightarrow$ Buffer $\rightarrow$ Flush" cycle to minimize DB round-trips while keeping memory footprint low.
+- **Iterative Mode (`is_bulk_task = False`)**: Executes `scrape_one()` within a loop. Optimized for detail pages. Implements a "Fetch -> Buffer -> Flush" cycle to minimize DB round-trips while keeping memory footprint low.
 
 **ADR-008.3: Isolation & Robustness (The "Shield" Pattern)**
 - In Iterative Mode, each `scrape_one()` call is wrapped in an independent `try-except` block.
@@ -203,6 +203,19 @@ Implement a tiered architecture to ensure separation of concerns and data integr
 **Consequences**:
 - **Pros**: Extreme reduction in `main.py` complexity; standardized error handling across all sources; easy extensibility for new data sources; optimized DB performance via balanced batching.
 - **Cons**: Slight increase in initial abstraction complexity (introduction of base classes).
+
+---
+
+## Implementation Progress (Current State)
+
+### Foundation Layer (Completed)
+- **Configuration**: Implemented `src/config.py` with dual-file loading (`.env` + `config.yaml`) per ADR-006.
+- **Database Operator**: Implemented `src/db_operator.py` as a Pure-INSERT engine with automatic audit injection (`BATCH_ID`, `LOAD_TIME`) and row-level fallback per ADR-005.
+- **Schema Initialization**: Created `sql/install_equity_schema.sql` establishing the `EQUITY` user, `SYS_BATCH_LOG`, and core ADB privileges.
+- **Scraper Framework**: Implemented `src/base_scraper.py` using the Template Method pattern, supporting both `Bulk` and `Iterative` modes with built-in Selenium lifecycle management per ADR-008.
+
+### Current Focus
+- **Phase 3: The First Win (List Scraper)**: Implementing `src/scrapers/list_scraper.py` to validate the end-to-end pipeline (Source -> DbOperator -> ODS).
 
 ---
 
@@ -257,5 +270,5 @@ All original scope items remain active. No significant scope changes have been m
 
 ---
 
-*Last Updated: 2026-07-30*
+*Last Updated: 2026-08-06*
 *Maintained by: Kakadu Development Team*
