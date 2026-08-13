@@ -1,6 +1,6 @@
 # test/test_list_scraper.py
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch, MagicMock
 import logging
 import sys
 import os
@@ -17,88 +17,67 @@ logger = logging.getLogger(__name__)
 class TestListScraper(unittest.TestCase):
 
     def setUp(self):
-        # 初始化 Scraper，使用单例 db_operator
         self.scraper = ListScraper()
 
-    def test_scrape_all_logic_with_mock(self):
+    @patch('src.scrapers.list_scraper.requests.get')
+    def test_scrape_all_logic_with_mock(self, mock_get):
         """
-        Unit Test: Verify that the scraper correctly parses HTML elements 
-        into the expected List[Dict] format without needing a real browser.
+        Unit Test: Verify that the scraper correctly parses CSV content 
+        from the API response into the expected List[Dict] format.
         """
-        # 1. Mock the WebDriver and its elements
-        mock_driver = MagicMock()
-        mock_row = MagicMock()
-        
-        # Mock the 'a' tag for CODE
-        mock_a = MagicMock()
-        mock_a.get_attribute.return_value = "CBA"
-        mock_row.find_element.return_value = mock_a
-        
-        # Mock the 'text-left' class for SECTOR
-        mock_sector = MagicMock()
-        mock_sector.get_attribute.return_value = "Financials"
-        
-        # Mock the 'text-right' elements for MCAP
-        mock_mcap = MagicMock()
-        mock_mcap.get_attribute.return_value = "100B"
-        
-        # Setup the row's find_element and find_elements behavior
-        def side_effect_find_element(by, value=None):
-            if by == "a": return mock_a
-            if by == "text-left": return mock_sector # Simplified for mock
-            return MagicMock()
-
-        # This is a simplified mock of the row's internal structure
-        mock_row.find_element.side_effect = lambda by, val=None: \
-            mock_a if by == "a" else mock_sector if "text-left" in str(by) else MagicMock()
-        
-        mock_row.find_elements.return_value = [MagicMock(), mock_mcap]
-        
-        # Mock the table structure: scroll-overlay -> tbody -> tr
-        mock_tbody = MagicMock()
-        mock_tbody.find_elements.return_value = [mock_row]
-        
-        mock_overlay = MagicMock()
-        mock_overlay.find_element.return_value = mock_tbody
-        
-        mock_driver.find_element.return_value = mock_overlay
+        # 1. Mock the API response
+        mock_response = MagicMock()
+        # 模拟真实的 CSV 内容，包含 Header 和两行数据（其中一行包含 "--"）
+        mock_csv_content = (
+            '"ASX code","Company name","GICs industry group","Listing date","Market Cap"\n'
+            '"CBA","Commonwealth Bank","Financials","1991-09-12",289040418474\n'
+            '"4DS","4DS Memory","Semiconductors","2010-12-09","--"'
+        )
+        mock_response.text = mock_csv_content
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
 
         # 2. Execute the scraping logic
-        results = self.scraper.scrape_all(mock_driver, [])
+        results = self.scraper.scrape_all(None, [])
 
         # 3. Assertions
-        self.assertEqual(len(results), 1)
+        self.assertEqual(len(results), 2)
+        
+        # Test first record (Normal)
         self.assertEqual(results[0]["CODE"], "CBA")
+        self.assertEqual(results[0]["COMPANY_NAME"], "Commonwealth Bank")
         self.assertEqual(results[0]["SECTOR"], "Financials")
-        self.assertEqual(results[0]["MARKET_CAP"], "100B")
-        logger.info("✅ Mock parsing test PASSED")
+        self.assertEqual(results[0]["LISTING_DATE"], "1991-09-12")
+        self.assertEqual(results[0]["MARKET_CAP"], "289040418474")
+        
+        # Test second record (Handle "--")
+        self.assertEqual(results[1]["CODE"], "4DS")
+        self.assertEqual(results[1]["COMPANY_NAME"], "4DS Memory")
+        self.assertEqual(results[1]["LISTING_DATE"], "2010-12-09")
+        self.assertIsNone(results[1]["MARKET_CAP"]) # 验证 "--" 被转换为 None
+        
+        logger.info("✅ Mock API parsing test PASSED")
 
     def test_end_to_end_integration(self):
-        """
-        Integration Test: Real Browser -> Real DB.
-        WARNING: This requires a working .env and Oracle Wallet.
-        """
+        conn = None
         try:
             logger.info("Starting End-to-End Integration Test for ListScraper...")
-            
-            # 1. Run the scraper (this will launch headless chrome)
-            # We use a dummy symbols list because it's a Bulk task
-            # We manually call the internal _run_bulk to test the pipeline
+            # 触发全链路：API -> Parse -> DbOperator -> Oracle
             self.scraper._run_bulk([], "ODS_COMPANY_MASTER")
             
-            # 2. Verify data in DB
             conn = db.get_connection()
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM EQUITY.ODS_COMPANY_MASTER")
             count = cursor.fetchone()[0]
             cursor.close()
-            db._pool.release(conn)
             
-            self.assertGreater(count, 0, "Database should contain records after scraping")
-            logger.info(f"✅ Integration test PASSED: {count} records found in DB")
-            
+            self.assertGreater(count, 0, "Database should contain records")
+            logger.info(f"✅ Integration test PASSED: {count} records found")
         except Exception as e:
             self.fail(f"Integration test FAILED: {e}")
+        finally:
+            if conn:
+                db._pool.release(conn)
 
 if __name__ == "__main__":
     unittest.main()

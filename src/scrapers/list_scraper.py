@@ -1,85 +1,88 @@
 # src/scrapers/list_scraper.py
 from __future__ import annotations
 import logging
+import requests
+import csv
+from io import StringIO
 from typing import Any, List, Dict, Optional
-from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.webdriver import WebDriver
 
 from ..base_scraper import BaseScraper
+# 导入 DbOperator 的单例实例，用于作为默认连接
+from ..db_operator import db as db_operator
 
 logger = logging.getLogger(__name__)
 
 class ListScraper(BaseScraper):
     """
-    Scraper for the ASX Ticker List.
-    Implements Bulk Mode: Fetches the entire market list in one pass.
+    Scraper for the ASX Ticker List via API CSV export.
+    Implements Bulk Mode: Fetches the entire market list via HTTP request.
     """
 
-    def __init__(self, db_op=None):
-        super().__init__(db_op)
-        # ADR-008: This is a high-density page, use Bulk Mode
+    def __init__(self, db_op: Optional[Any] = None):
+        # 关键修复：如果 db_op 为 None，则使用导入的单例 db_operator
+        # 这样可以防止 self.db 在 BaseScraper 中被赋值为 None
+        actual_db = db_op if db_op is not None else db_operator
+        super().__init__(actual_db)
+        
+        # ADR-008: Bulk Mode for high-density data
         self.is_bulk_task = True 
-        self.needs_driver = True
-        # The target table in ODS (defined in SAD)
+        self.needs_driver = False  # API based, no Selenium needed
         self.target_table = "ODS_COMPANY_MASTER"
 
     def scrape_all(self, driver: Optional[WebDriver], symbols: List[str]) -> List[Dict[str, Any]]:
         """
-        Extracts the full ASX ticker list from the provided URL.
-        
-        Args:
-            driver: Headless Chrome driver provided by BaseScraper.
-            symbols: Not used for Bulk mode, but passed by the orchestrator.
+        Fetches the ASX company directory CSV and parses it into a list of dicts.
         """
-        if not driver:
-            logger.error("WebDriver is required for ListScraper but was not provided.")
-            return []
-
-        # Note: The URL should ideally come from config.yaml, 
-        # but for this first version, we use the target URL.
-        # In a real scenario, we'd use self.config.list_link
-        target_url = "https://www.asx.com.au/markets/trade-our-shares/company-directory" # 请根据实际URL修改
+        # API Endpoint for CSV export
+        target_url = "https://asx.api.markitdigital.com/asx-research/1.0/companies/directory/file"
         
         try:
-            logger.info(f"Navigating to ASX Company Directory: {target_url}")
-            driver.get(target_url)
+            logger.info(f"Fetching ASX Company Directory CSV from API: {target_url}")
+            # Use a browser-like User-Agent to avoid being blocked by API
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            response = requests.get(target_url, headers=headers, timeout=30)
+            response.raise_for_status()
             
-            # Wait for the table to load (Simple implementation, consider WebDriverWait for production)
-            # Based on the old extractList.py logic:
-            scroll_overlay = driver.find_element(By.CLASS_NAME, "scroll-overlay")
-            tbody = scroll_overlay.find_element(By.TAG_NAME, "tbody")
-            rows = tbody.find_elements(By.TAG_NAME, "tr")
+            # Decode CSV content
+            csv_content = response.text
+            f = StringIO(csv_content)
             
-            logger.info(f"Found {len(rows)} companies in the list.")
+            # Use DictReader to automatically use the first row as keys
+            reader = csv.DictReader(f)
             
             extracted_data = []
-            for row in rows:
-                try:
-                    # Extracting data based on the old extractList.py logic
-                    # We map them to the ODS_COMPANY_MASTER business columns
-                    code = row.find_element(By.TAG_NAME, "a").get_attribute("innerHTML").strip()
-                    sector = row.find_element(By.CLASS_NAME, "text-left").get_attribute("innerHTML").strip()
-                    
-                    # Market Cap is usually the last element in the 'text-right' group
-                    infos = row.find_elements(By.CLASS_NAME, "text-right")
-                    mcap = infos[-1].get_attribute("innerHTML").strip() if infos else "N/A"
-                    
-                    # We return a Dict. DbOperator will handle BATCH_ID and LOAD_TIME.
-                    extracted_data.append({
-                        "CODE": code,
-                        "SECTOR": sector,
-                        "MARKET_CAP": mcap
-                    })
-                except Exception as e:
-                    logger.warning(f"Skipping a row due to extraction error: {e}")
-                    continue
+            for row in reader:
+                # Exact mapping based on the provided CSV file:
+                # "ASX code" -> CODE
+                # "Company name" -> COMPANY_NAME
+                # "GICs industry group" -> SECTOR
+                # "Listing date" -> LISTING_DATE
+                # "Market Cap" -> MARKET_CAP
+                
+                mcap_raw = row.get("Market Cap", "").strip()
+                # Handle the "--" case found in the CSV
+                mcap = None if mcap_raw == "--" or not mcap_raw else mcap_raw
+                
+                extracted_data.append({
+                    "CODE": row.get("ASX code", "").strip(),
+                    "COMPANY_NAME": row.get("Company name", "").strip(),
+                    "SECTOR": row.get("GICs industry group", "").strip(),
+                    "LISTING_DATE": row.get("Listing date", "").strip(),
+                    "MARKET_CAP": mcap
+                })
             
+            logger.info(f"Successfully extracted {len(extracted_data)} companies from CSV.")
             return extracted_data
 
+        except requests.exceptions.RequestException as e:
+            logger.error(f"HTTP request failed while fetching ASX list: {e}")
+            return []
         except Exception as e:
-            logger.error(f"Failed to scrape ASX list: {e}")
+            logger.error(f"Unexpected error parsing ASX CSV: {e}")
             return []
 
     def scrape_one(self, driver: Optional[WebDriver], symbol: str) -> Optional[Dict[str, Any]]:
-        """Not used in Bulk Mode."""
         raise NotImplementedError("ListScraper operates in Bulk Mode only.")
