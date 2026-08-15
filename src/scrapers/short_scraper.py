@@ -1,4 +1,4 @@
-# src/scrapers/short_position_scraper.py
+# src/scrapers/short_scraper.py
 from __future__ import annotations
 import logging
 import requests
@@ -29,6 +29,7 @@ class ShortPositionScraper(BaseScraper):
     def scrape_all(self, driver: Optional[WebDriver], symbols: List[str]) -> List[Dict[str, Any]]:
         """
         Fetches the Shortman CSV and parses it into a list of dicts.
+        All extracted values are converted to strings to align with ODS VARCHAR design.
         """
         target_url = "https://www.shortman.com.au/downloadeddata/latest.csv"
         
@@ -43,18 +44,15 @@ class ShortPositionScraper(BaseScraper):
             extracted_data = []
             for row in reader:
                 # Mapping based on the CSV structure provided
-                # "Product" -> PRODUCT_NAME
-                # "Product Code" -> CODE
-                # "Reported Short Positions" -> SHORT_POSITIONS
-                # "Total Product in Issue" -> TOTAL_SHARES
-                # "% of Total Product in Issue Reported as Short Positions" -> SHORT_PERCENT
+                # We use str(row.get(...) or "") to ensure that None values become empty strings
+                # and all data is stored as VARCHAR in ODS.
                 
                 extracted_data.append({
-                    "PRODUCT_NAME": row.get("Product", "").strip(),
-                    "CODE": row.get("Product Code", "").strip(),
-                    "SHORT_POSITIONS": row.get("Reported Short Positions", "0").replace(",", ""),
-                    "TOTAL_SHARES": row.get("Total Product in Issue", "0").replace(",", ""),
-                    "SHORT_PERCENT": row.get("% of Total Product in Issue Reported as Short Positions", "0")
+                    "PRODUCT_NAME": str(row.get("Product", "") or "").strip(),
+                    "CODE": str(row.get("Product Code", "") or "").strip(),
+                    "SHORT_POSITIONS": str(row.get("Reported Short Positions", "") or "").replace(",", "").strip(),
+                    "TOTAL_SHARES": str(row.get("Total Product in Issue", "") or "").replace(",", "").strip(),
+                    "SHORT_PERCENT": str(row.get("% of Total Product in Issue Reported as Short Positions", "") or "").strip()
                 })
             
             logger.info(f"Successfully extracted {len(extracted_data)} short position records.")
