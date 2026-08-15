@@ -48,7 +48,7 @@ Kakadu is a lightweight data acquisition and quantitative intelligence engine de
 | afr | AFR Real-time quotes & EAV depth | API / HTTP JSON | Pre-close / Post-close |
 | yahoo | Yahoo 60-day / 1-hour K-line history | API / HTTP JSON | Daily Post-close |
 | annc | ASX Company Announcements | Headless Browser (Selenium) | Daily Morning |
-| company_master | Ticker universe & metadata | Headless Browser (Selenium) | Weekly (Sat 06:00 AEST) |
+| company_master | Ticker universe & metadata | API / HTTP CSV | Weekly (Sat 06:00 AEST) |
 | analyst_consensus | Broker analyst ratings & consensus | Headless Browser (Selenium) | Weekly (Sun 07:00 AEST) |
 | short | Shortman daily short interest | API / HTTP JSON | Daily Post-close |
 
@@ -81,7 +81,7 @@ Kakadu is a lightweight data acquisition and quantitative intelligence engine de
 | :--- | :--- | :--- |
 | Zero Instant Client | Uses python-oracledb Thin Mode without C libraries | Saves ~400MB RAM overhead |
 | Small-Batch PURE-INSERT | Commits 5–10 records per execution batch | Maintains flat Python RAM footprint; deduplication deferred to async PL/SQL |
-| Browser Isolation & Purge | Sequential Selenium execution followed by cleanup_vm.sh | Prevents orphan Chrome processes from leaking RAM |
+| Browser Isolation & Purge | Sequential Selenium execution followed by cleanup_vm.sh (only for annc & analyst_consensus); company_master migrated to API/CSV | Prevents orphan Chrome processes from leaking RAM; reduced cleanup frequency lowers VM pressure |
 | Physical VM Reboot | Scheduled weekly crontab reboot | Completely flushes OS cache and memory fragmentation |
 | Swap Safety Net | Allocates a 512MB swap file on the OS layer | Emergency buffer for unexpected OOM spikes |
 

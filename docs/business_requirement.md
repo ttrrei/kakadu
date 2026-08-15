@@ -38,16 +38,16 @@ Adopts standardized naming driven by data domains and business entities. Busines
 | **`ODS_PRICE_OHLCV`** | Yahoo 60d/1h K-line price data | `(CODE, RAW_TIMESTAMP)` |
 | **`ODS_PRICE_TICK`** | AFR real-time tick-level granular price | `(CODE, TICK_TIME)` |
 | **`ODS_PRICE_QUOTE_EAV`** | AFR real-time quote EAV key-value pairs (bid/ask, valuation, etc.) | `(CODE, TAG, UPDATE_TIME)` |
-| **`ODS_SHORT_POSITION`** | Market-wide daily short positions | `(CODE, UPDATE_DATE)` |
+| **`ODS_SHORT_POSITIONS`** | Market-wide daily short positions (aligned with implementation) | `(CODE, UPDATE_DATE)` |
 | **`ODS_MARKET_ANNC`** | ASX official company announcements and news | `(CODE, "DATE", TITLE)` |
-| **`ODS_COMPANY_MASTER`** | Market-wide company master data (code, sector, market cap) | `(CODE, UPDATE_DATE)` |
+| **`ODS_COMPANY_MASTER`** | Market-wide company master data (code, sector, market cap) via API CSV export | `(CODE, UPDATE_DATE)` |
 | **`ODS_ANALYST_CONSENSUS`** | Broker and analyst consensus ratings | `(CODE, UPDATE_DATE)` |
 
 ---
 
 ## 5. Execution Schedule Windows (AEST)
 - **Pre-close (Pre-market / Near close ~15:25 Mon-Fri)**: Collects afr + quote near-closing prices for intra-day signal calculation.
-- **Post-close (Post-market settlement ~16:45 onwards Mon-Fri)**: Sequentially collects afr + quote settlement prices, shortman shorting data, and annc company announcements.
+- **Post-close (Post-market settlement ~16:45 onwards Mon-Fri)**: Sequentially collects afr + quote settlement prices, shortman shorting data (`ODS_SHORT_POSITIONS`), and annc company announcements.
 - **Weekly (Weekend Sat 06:00 / Sun 07:00)**:
-  - Runs Selenium to refresh `ODS_COMPANY_MASTER` master data and `ODS_ANALYST_CONSENSUS` broker ratings.
+  - Fetches `ODS_COMPANY_MASTER` master data via **API CSV Export** (optimized from Selenium for zero-browser memory footprint) and collects `ODS_ANALYST_CONSENSUS` broker ratings via Selenium.
   - Executes VM bash + crontab scheduled reboot task.
