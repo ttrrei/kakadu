@@ -40,13 +40,13 @@ Kakadu is an ultra-lightweight quantitative data collection and indicator calcul
 - [ ] **2.3 Extractor #3: quote (ASX Real-time/EOD Quotes - API)**
   Implement ASX real-time and end-of-day quote data collection, writing to ODS_PRICE_OHLCV.
 
-- [ ] **2.4 Extractor #4: short (Shortman API)**
+- [x] **2.4 Extractor #4: short (Shortman API)**
   Implement full-market short position history data collection, writing to ODS_SHORT_POSITION.
 
 - [ ] **2.5 Extractor #5: annc (ASX Market Announcements - Selenium)**
   Implement headless browser scraping, integrate `cleanup_vm.sh` to forcefully terminate residual Chrome/Chromedriver processes to prevent RAM leaks.
 
-- [ ] **2.6 Extractor #6: company_master (Ticker Universe - Selenium)**
+- [x] **2.6 Extractor #6: company_master (Ticker Universe - API CSV Export)**
   Implement weekly full-market Master data collection, writing to ODS_COMPANY_MASTER.
 
 - [ ] **2.7 Extractor #7: analyst_consensus (Broker Ratings - Selenium)**

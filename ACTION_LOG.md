@@ -206,6 +206,22 @@ Implement a tiered architecture to ensure separation of concerns and data integr
 
 ---
 
+### ADR-009: ListScraper Implementation Pivot (Selenium → API CSV)
+**Status**: Approved
+**Date**: 2026-08-15
+**Context**: The original plan was to use Selenium to scrape the Ticker list, but it was discovered that ASX provides a direct API CSV export endpoint.
+
+**Decision**: Abandon the Selenium approach and use `requests` to directly fetch the CSV file.
+
+**Rationale**:
+- **Minimal memory footprint**: No Chrome process required, fully compliant with 1GB RAM constraint.
+- **High stability**: API responses are more robust than DOM parsing, with no concern for page structure changes.
+- **Extreme speed**: Single request retrieves the full dataset.
+
+**Consequence**: Reduced VM CPU/RAM peaks and simplified code maintenance.
+
+---
+
 ## Implementation Progress (Current State)
 
 ### Foundation Layer (Completed)
