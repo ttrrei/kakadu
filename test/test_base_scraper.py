@@ -37,6 +37,22 @@ class MockIterativeScraper(BaseScraper):
             raise Exception("Simulated Scrape Error")
         return {"CODE": symbol, "VAL": "Iterative"}
 
+class MockOneToManyScraper(BaseScraper):
+    """模拟像 Yahoo 这样一个 Symbol 返回多条记录的 Scraper"""
+    is_bulk_task = False
+    needs_driver = False
+
+    def scrape_all(self, driver, symbols):
+        return []
+
+    def scrape_one(self, driver, symbol):
+        # 模拟为每个 symbol 返回 3 条历史数据
+        return [
+            {"CODE": symbol, "TIME": "10:00", "VAL": "V1"},
+            {"CODE": symbol, "TIME": "11:00", "VAL": "V2"},
+            {"CODE": symbol, "TIME": "12:00", "VAL": "V3"},
+        ]
+
 class TestBaseScraper(unittest.TestCase):
 
     def setUp(self):
@@ -46,6 +62,7 @@ class TestBaseScraper(unittest.TestCase):
         self.bulk_scraper = MockBulkScraper(db_op=self.mock_db)
         self.csv_scraper = MockCsvScraper(db_op=self.mock_db)
         self.iter_scraper = MockIterativeScraper(db_op=self.mock_db)
+        self.otm_scraper = MockOneToManyScraper(db_op=self.mock_db)
 
     @patch('selenium.webdriver.Chrome')
     def test_bulk_run_with_driver(self, mock_chrome):
@@ -91,6 +108,23 @@ class TestBaseScraper(unittest.TestCase):
         self.assertEqual(len(records), 2)
         self.assertEqual(records[0]["CODE"], "SUCCESS1")
         self.assertEqual(records[1]["CODE"], "SUCCESS2")
+
+    def test_iterative_run_one_to_many(self):
+        """测试迭代模式处理 One-to-Many (List[Dict]) 的情况"""
+        symbols = ["AAPL", "MSFT"]
+        # 每个 symbol 返回 3 条，共 6 条
+        self.otm_scraper.run(symbols, "TABLE_OTM", "JOB_OTM")
+        
+        # 验证：DbOperator.insert_batch 应该被调用
+        self.mock_db.insert_batch.assert_called()
+        args, _ = self.mock_db.insert_batch.call_args
+        records = args[1]
+        
+        # 关键验证：buffer 应该是扁平的 List[Dict]，而不是 List[List[Dict]]
+        self.assertEqual(len(records), 6)
+        self.assertIsInstance(records[0], dict)
+        self.assertEqual(records[0]["CODE"], "AAPL")
+        self.assertEqual(records[5]["CODE"], "MSFT")
 
     @patch('selenium.webdriver.Chrome')
     def test_driver_lazy_loading(self, mock_chrome):
