@@ -74,9 +74,11 @@ class BaseScraper(ABC):
             logger.info(f"Starting job {job_name} on table {table_name}...")
             
             if self.is_bulk_task:
-                self._run_bulk(symbols, table_name)
+                # Pass job_name to bulk strategy
+                self._run_bulk(symbols, table_name, job_name)
             else:
-                self._run_iterative(symbols, table_name)
+                # Pass job_name to iterative strategy
+                self._run_iterative(symbols, table_name, job_name)
                 
             logger.info(f"Job {job_name} completed successfully.")
             
@@ -90,7 +92,7 @@ class BaseScraper(ABC):
                 self._driver = None
                 logger.info("WebDriver closed.")
 
-    def _run_bulk(self, symbols: List[str], table_name: str):
+    def _run_bulk(self, symbols: List[str], table_name: str, job_name: str):
         """
         Strategy for Bulk Mode: One-time fetch -> One-time write.
         """
@@ -103,12 +105,13 @@ class BaseScraper(ABC):
         data = self.scrape_all(driver, symbols)
         
         if data:
-            self.db.insert_batch(table_name, data)
+            # Pass job_name as batch_id to ensure audit tracking
+            self.db.insert_batch(table_name, data, batch_id=job_name)
             logger.info(f"Bulk insert completed: {len(data)} records.")
         else:
             logger.warning("No data extracted in bulk mode.")
 
-    def _run_iterative(self, driver_init_symbols: List[str], table_name: str):
+    def _run_iterative(self, driver_init_symbols: List[str], table_name: str, job_name: str):
         """
         Strategy for Iterative Mode: Fetch -> Buffer -> Flush.
         Implements the 'Shield' pattern to isolate failures of single symbols.
@@ -140,17 +143,19 @@ class BaseScraper(ABC):
             except Exception as e:
                 # Shield Pattern: Log error and continue to next symbol
                 logger.error(f"Failed to scrape symbol {symbol}: {e}")
-                fail_count += 1
+                fail_count +=  1
                 continue
 
             # Flush buffer to DB when batch size is reached to save memory
             if len(buffer) >= self.batch_size:
-                self.db.insert_batch(table_name, buffer)
+                # IMPORTANT: Pass a copy of the buffer AND the job_name as batch_id
+                self.db.insert_batch(table_name, list(buffer), batch_id=job_name)
                 buffer.clear()
 
         # Final flush for remaining records
         if buffer:
-            self.db.insert_batch(table_name, buffer)
+            # IMPORTANT: Pass a copy of the buffer AND the job_name as batch_id
+            self.db.insert_batch(table_name, list(buffer), batch_id=job_name)
 
         logger.info(f"Iterative run finished. Success: {success_count}, Failed: {fail_count}")
 

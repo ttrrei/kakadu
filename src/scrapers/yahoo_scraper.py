@@ -82,8 +82,7 @@ class YahooScraper(BaseScraper):
                     "HIGH_PRICE": quotes['high'][i],
                     "LOW_PRICE": quotes['low'][i],
                     "CLOSE_PRICE": close_price,
-                    "VOLUME": quotes['volume'][i],
-                    "RECORD_DTS": time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(ts))
+                    "VOLUME": quotes['volume'][i]
                 })
             
             if extracted_records:
