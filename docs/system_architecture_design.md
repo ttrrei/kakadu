@@ -4,12 +4,12 @@
 
 Kakadu is a lightweight data acquisition and quantitative intelligence engine designed for ASX market data. Running on an OCI Micro VM (1GB RAM) with an Oracle Autonomous Database (Always Free Tier) backend, Kakadu achieves stable execution under extreme hardware constraints via a **"Thin-Edge, Thick-Core"** architecture.
 
-```text
+```
 +-----------------------------------------------------------------------+
 | Thin-Edge (Python 3.10+)                                              |
 | - Stateless HTTP/API Fetchers                                         |
 | - Standalone Headless Browser Scrapers (Selenium, on-demand/ephemeral)|
-| - Small-Batch Chunked PURE-INSERT (5–10 records per execution)       |
+| - Small-Batch Chunked PURE-INSERT (5-10 records per execution)         |
 | - Local Text Persistence (saved to /home/ubuntu/backup/, OCI sync)    |
 +-----------------------------------------------------------------------+
                                   |
@@ -18,8 +18,8 @@ Kakadu is a lightweight data acquisition and quantitative intelligence engine de
 +-----------------------------------------------------------------------+
 | Thick-Core (Oracle PL/SQL)                                            |
 | - ODS Tables (Raw VARCHAR2 landing, zero data loss)                   |
-| - Data Cleansing & Type Cast Stored Procedures                        |
-| - Technical Indicator Computation Engine (EMA, PSAR, Supertrend)      |
+| - Data Cleansing & Type Cast Stored Procedures                         |
+| - Technical Indicator Computation Engine (EMA, PSAR, Supertrend)       |
 +-----------------------------------------------------------------------+
 ```
 
@@ -43,10 +43,9 @@ Kakadu is a lightweight data acquisition and quantitative intelligence engine de
 **Responsibility:** Decoupled, independent scraping modules per data source.
 
 | Component | Data Source | Method | Schedule Frequency |
-| :--- | :--- | :--- | :--- |
-| quote | ASX Real-time / EOD Quotes | API / HTTP JSON | Multiple times per trading day |
+|-----------|-------------|--------|-------------------|
+| price_ohlcv | Yahoo / ASX Quotes | API / HTTP JSON | Multiple times per trading day / Daily Post-close |
 | afr | AFR Real-time quotes & EAV depth | API / HTTP JSON | Pre-close / Post-close |
-| yahoo | Yahoo 60-day / 1-hour K-line history | API / HTTP JSON | Daily Post-close |
 | annc | ASX Company Announcements | Headless Browser (Selenium) | Daily Morning |
 | company_master | Ticker universe & metadata | API / HTTP CSV | Weekly (Sat 06:00 AEST) |
 | analyst_consensus | Broker analyst ratings & consensus | Headless Browser (Selenium) | Weekly (Sun 07:00 AEST) |
@@ -61,13 +60,13 @@ Kakadu is a lightweight data acquisition and quantitative intelligence engine de
 
 ### E. Text Backup & Validation Layer (src/backup/)
 
-**Responsibility:** Prior to database ingestion, raw extracted data is persisted locally in JSON Lines format under /home/ubuntu/backup/ (utilizing the primary 30GB disk partition) and batch-uploaded to OCI Object Storage. Post-ingestion, record counts between OCI backup files and DB tables are verified; discrepancies exceeding threshold trigger alerts.
+**Responsibility:** Prior to database ingestion, raw extracted data is persisted locally in JSON Lines format under `/home/ubuntu/backup/` (utilizing the primary 30GB disk partition) and batch-uploaded to OCI Object Storage. Post-ingestion, record counts between OCI backup files and DB tables are verified; discrepancies exceeding threshold trigger alerts.
 
 ## 3. ODS Domain Model & Legacy Mapping
 
 | Kakadu ODS Table | Data Domain | Description | Frequency / Window (AEST) | Business Primary Key | Legacy Ref |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| ODS_PRICE_OHLCV | Yahoo Quotes | Yahoo 60d / 1h K-line prices | Daily Post-close | (CODE, RAW_TIMESTAMP) | ods_yahoo_history |
+|------------------|-------------|-------------|---------------------------|----------------------|------------|
+| ODS_PRICE_OHLCV | Yahoo / ASX Quotes | OHLCV prices (Real-time/EOD/History) | Daily Post-close / Intraday | (CODE, RAW_TIMESTAMP) | ods_yahoo_history |
 | ODS_PRICE_TICK | AFR Real-Time Tick | AFR real-time tick data | Pre-close & Post-close | (CODE, TICK_TIME) | ODS_TICKER |
 | ODS_PRICE_QUOTE_EAV | AFR Quote EAV | AFR market depth / valuation pairs | Pre-close 15:25 / Post-close 16:45 | (CODE, TAG, UPDATE_TIME) | ODS_QUOTE |
 | ODS_SHORT_POSITION | Shortman Daily | Daily short interest data | Daily Post-close | (CODE, UPDATE_DATE) | ODS_SHORTMAN_HISTORY |
@@ -78,7 +77,7 @@ Kakadu is a lightweight data acquisition and quantitative intelligence engine de
 ## 4. Resource Management & Anti-Crash Strategies
 
 | Strategy | Implementation | Effect |
-| :--- | :--- | :--- |
+|----------|----------------|--------|
 | Zero Instant Client | Uses python-oracledb Thin Mode without C libraries | Saves ~400MB RAM overhead |
 | Small-Batch PURE-INSERT | Commits 5–10 records per execution batch | Maintains flat Python RAM footprint; deduplication deferred to async PL/SQL |
 | Browser Isolation & Purge | Sequential Selenium execution followed by cleanup_vm.sh (only for annc & analyst_consensus); company_master migrated to API/CSV | Prevents orphan Chrome processes from leaking RAM; reduced cleanup frequency lowers VM pressure |
@@ -89,17 +88,17 @@ Kakadu is a lightweight data acquisition and quantitative intelligence engine de
 
 ## 5. Data Backup & Consistency Verification
 
-- **Local Disk Persistence:** Raw extracted records (JSON Lines) are saved to /home/ubuntu/backup/<source>/<timestamp>.jsonl on the 30GB main partition.
+- **Local Disk Persistence:** Raw extracted records (JSON Lines) are saved to `/home/ubuntu/backup/<source>/<timestamp>.jsonl` on the 30GB main partition.
 - **OCI Sync:** Upon task completion, the local backup directory is batch-uploaded to OCI Object Storage via OCI CLI or SDK.
 - **Consistency Verification:** Compares ingested ODS record counts against raw text line counts using a **two-tier alerting strategy**:
-  - **Tier 1 (Warning Log)**: Single batch row-count mismatch → logged locally, backup retained, no Pushover notification.
-  - **Tier 2 (Pushover Alert)**: Cumulative retry failures OR bulk missingness across multiple batches → triggers Pushover notification.
-- **Auto-Purge:** Once uploaded and verified, processed local files under /home/ubuntu/backup/ are automatically purged to prevent local disk exhaustion.
+  - **Tier 1 (Warning Log):** Single batch row-count mismatch → logged locally, backup retained, no Pushover notification.
+  - **Tier 2 (Pushover Alert):** Cumulative retry failures OR bulk missingness across multiple batches → triggers Pushover notification.
+- **Auto-Purge:** Once uploaded and verified, processed local files under `/home/ubuntu/backup/` are automatically purged to prevent local disk exhaustion.
 
 ## 6. Logging & Alerting
 
 - **Logging:** Process-level logs are written to local files (daily rotation) and Stdout.
 - **Alerting:** Pushover notifications use a **two-tier strategy** aligned with BRD's "High-Tolerance Anti-False-Alarm" principle:
-  - **Tier 1 (Warning Log)**: When a single batch's local JSONL backup row count does not match the database write row count → log to file, retain backup. No human notification.
-  - **Tier 2 (Pushover Alert)**: When cumulative retry failures occur OR bulk data missingness is detected across the network/system → triggers Pushover to on-call.
-  - **Rationale**: Prevents alert fatigue from transient single-batch hiccups while ensuring serious systemic issues escalate immediately.
+  - **Tier 1 (Warning Log):** When a single batch's local JSONL backup row count does not match the database write row count → log to file, retain backup. No human notification.
+  - **Tier 2 (Pushover Alert):** When cumulative retry failures occur OR bulk data missingness is detected across the network/system → triggers Pushover to on-call.
+  - **Rationale:** Prevents alert fatigue from transient single-batch hiccups while ensuring serious systemic issues escalate immediately.

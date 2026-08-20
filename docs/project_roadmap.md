@@ -21,7 +21,7 @@ Kakadu is an ultra-lightweight quantitative data collection and indicator calcul
 
 - [ ] **1.1 Environment Setup**: Configure `.env` environment variables, deploy Oracle mTLS Wallet, and verify python-oracledb Thin Mode connectivity (execute `SELECT 1 FROM DUAL`).
 
-- [ ] **1.2 ODS Schema Creation**: Execute `install_goldenwattle.sql` to establish the EQUITY Schema and 7 ODS_* raw staging tables with full VARCHAR2 structure.
+- [ ] **1.2 ODS Schema Creation**: Execute `install_goldenwattle.sql` to establish the EQUITY Schema and 6 ODS_* raw staging tables with full VARCHAR2 structure.
 
 - [ ] **1.3 DbOperator (Append-Only)**: Implement `db_operator.py` using small-batch pure-INSERT commit logic (Batch Size = 5~10), without DB-side deduplication locks, to ensure maximum write throughput.
 
@@ -31,25 +31,22 @@ Kakadu is an ultra-lightweight quantitative data collection and indicator calcul
 
 **Goal**: Develop each data source individually, with full end-to-end regression testing and 1GB RAM stress verification upon completion of each.
 
-- [ ] **2.1 Extractor #1: yahoo (Yahoo Finance API)**
-  Implement pre-close and post-close independent scraping parameter handling (`--session-type`). Regression test: API fetch → JSONL backup → ODS_PRICE_OHLCV pure-INSERT write → OCI comparison.
-  
+- [ ] **2.1 Extractor #1: price_ohlcv (Yahoo/ASX API)**
+  Implement unified OHLCV data collection (Real-time/EOD/History) with pre-close and post-close independent scraping parameter handling (`--session-type`). Regression test: API fetch → JSONL backup → ODS_PRICE_OHLCV pure-INSERT write → OCI comparison.
+
 - [ ] **2.2 Extractor #2: afr (AFR Quote & Tick API)**
   Implement AFR Quote & Tick multi-target table simultaneous writing: ODS_PRICE_TICK (tick-level granularity) and ODS_PRICE_QUOTE_EAV (bid-ask order book depth).
 
-- [ ] **2.3 Extractor #3: quote (ASX Real-time/EOD Quotes - API)**
-  Implement ASX real-time and end-of-day quote data collection, writing to ODS_PRICE_OHLCV.
-
-- [x] **2.4 Extractor #4: short (Shortman API)**
+- [x] **2.3 Extractor #3: short (Shortman API)**
   Implement full-market short position history data collection, writing to ODS_SHORT_POSITION.
 
-- [ ] **2.5 Extractor #5: annc (ASX Market Announcements - Selenium)**
+- [ ] **2.4 Extractor #4: annc (ASX Market Announcements - Selenium)**
   Implement headless browser scraping, integrate `cleanup_vm.sh` to forcefully terminate residual Chrome/Chromedriver processes to prevent RAM leaks.
 
-- [x] **2.6 Extractor #6: company_master (Ticker Universe - API CSV Export)**
+- [x] **2.5 Extractor #5: company_master (Ticker Universe - API CSV Export)**
   Implement weekly full-market Master data collection, writing to ODS_COMPANY_MASTER.
 
-- [ ] **2.7 Extractor #7: analyst_consensus (Broker Ratings - Selenium)**
+- [ ] **2.6 Extractor #6: analyst_consensus (Broker Ratings - Selenium)**
   Implement weekly institutional ratings data collection, writing to ODS_ANALYST_CONSENSUS.
 
 ### Phase 3: Scheduling, Isolation & Anti-Crash
@@ -61,9 +58,12 @@ Kakadu is an ultra-lightweight quantitative data collection and indicator calcul
 - [ ] **3.2 Memory Protection & Physical Reboot**: Configure 512MB OS Swap space as a last-resort fallback buffer. Configure weekend scheduled physical VM bash reboot to fully release OS memory fragments and cache.
 
 - [ ] **3.3 Two-Tier Anti-Noise Alerting**: Integrate Pushover alerting using a two-tier strategy aligned with BRD's "High-Tolerance Anti-False-Alarm" principle:
-  - **Tier 1 (Warning Log)**: Single batch row-count mismatch between local JSONL backup and database write → log to file, retain backup. No Pushover notification.
-  - **Tier 2 (Pushover Alert)**: Cumulative retry failures OR bulk data missingness across multiple batches/sources → triggers Pushover to on-call.
-  - **Rationale**: Prevents alert fatigue from transient single-batch hiccups while ensuring serious systemic issues escalate immediately.
+
+  **Tier 1 (Warning Log)**: Single batch row-count mismatch between local JSONL backup and database write → log to file, retain backup. No Pushover notification.
+
+  **Tier 2 (Pushover Alert)**: Cumulative retry failures OR bulk data missingness across multiple batches/sources → triggers Pushover to on-call.
+
+  **Rationale**: Prevents alert fatigue from transient single-batch hiccups while ensuring serious systemic issues escalate immediately.
 
 ### Phase 4: Thick-Core PL/SQL Analytics Engine
 
