@@ -133,3 +133,84 @@ EXCEPTION
     END IF;
 END;
 /
+
+-- =============================================================================
+-- Table: ODS_PRICE_OHLCV (Yahoo Hourly Data - Idempotent Version with Reset)
+-- =============================================================================
+
+BEGIN
+  -- 1. 尝试删除旧表以确保结构更新 (Reset)
+  EXECUTE IMMEDIATE 'DROP TABLE EQUITY.ODS_PRICE_OHLCV';
+  DBMS_OUTPUT.PUT_LINE('Table ODS_PRICE_OHLCV dropped successfully.');
+EXCEPTION
+  WHEN OTHERS THEN
+    IF SQLCODE = -942 THEN
+      DBMS_OUTPUT.PUT_LINE('Table ODS_PRICE_OHLCV did not exist, proceeding to creation.');
+    ELSE
+      RAISE;
+    END IF;
+END;
+/
+
+BEGIN
+  -- 2. 创建表 (All business columns as VARCHAR2 per ADR-005)
+  EXECUTE IMMEDIATE '
+    CREATE TABLE EQUITY.ODS_PRICE_OHLCV (
+        "CODE"            VARCHAR2(4000 BYTE),
+        "RAW_TIMESTAMP"   VARCHAR2(4000 BYTE),
+        "OPEN_PRICE"      VARCHAR2(4000 BYTE),
+        "HIGH_PRICE"      VARCHAR2(4000 BYTE),
+        "LOW_PRICE"       VARCHAR2(4000 BYTE),
+        "CLOSE_PRICE"     VARCHAR2(4000 BYTE),
+        "VOLUME"          VARCHAR2(4000 BYTE),
+        "BATCH_ID"        VARCHAR2(50)   NOT NULL, 
+        "LOAD_TIME"       VARCHAR2(50)   NOT NULL,
+        "RECORD_DTS"    TIMESTAMP WITH LOCAL TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    )';
+  DBMS_OUTPUT.PUT_LINE('Table ODS_PRICE_OHLCV created successfully.');
+EXCEPTION
+  WHEN OTHERS THEN
+    IF SQLCODE = -955 THEN
+      DBMS_OUTPUT.PUT_LINE('Table ODS_PRICE_OHLCV already exists, skipping creation.');
+    ELSE
+      RAISE; 
+    END IF;
+END;
+/
+
+-- 索引创建
+BEGIN
+  EXECUTE IMMEDIATE 'CREATE INDEX EQUITY.IDX_ODS_PRICE_BATCH ON EQUITY.ODS_PRICE_OHLCV("BATCH_ID")';
+EXCEPTION
+  WHEN OTHERS THEN
+    IF SQLCODE = -955 THEN 
+      DBMS_OUTPUT.PUT_LINE('Index IDX_ODS_PRICE_BATCH already exists, skipping.');
+    ELSE
+      RAISE;
+    END IF;
+END;
+/
+
+BEGIN
+  EXECUTE IMMEDIATE 'CREATE INDEX EQUITY.IDX_ODS_PRICE_CODE ON EQUITY.ODS_PRICE_OHLCV("CODE")';
+EXCEPTION
+  WHEN OTHERS THEN
+    IF SQLCODE = -955 THEN 
+      DBMS_OUTPUT.PUT_LINE('Index IDX_ODS_PRICE_CODE already exists, skipping.');
+    ELSE
+      RAISE;
+    END IF;
+END;
+/
+
+BEGIN
+  EXECUTE IMMEDIATE 'CREATE INDEX EQUITY.IDX_ODS_PRICE_TS ON EQUITY.ODS_PRICE_OHLCV("RAW_TIMESTAMP")';
+EXCEPTION
+  WHEN OTHERS THEN
+    IF SQLCODE = -955 THEN 
+      DBMS_OUTPUT.PUT_LINE('Index IDX_ODS_PRICE_TS already exists, skipping.');
+    ELSE
+      RAISE;
+    END IF;
+END;
+/

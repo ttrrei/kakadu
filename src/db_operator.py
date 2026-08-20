@@ -131,7 +131,6 @@ class DbOperator:
         sql = f"INSERT INTO {table_name} ({cols_sql}) VALUES ({binds_sql})"
 
         # Execute in small chunks
-        # 注意：EnvConfig 中目前没有 BATCH_SIZE，这里使用默认值 10
         batch_size = getattr(self.config, "BATCH_SIZE", 10)
         for start in range(0, len(prepared_records), batch_size):
             chunk = prepared_records[start : start + batch_size]
@@ -146,6 +145,8 @@ class DbOperator:
         try:
             try:
                 cursor.executemany(sql, chunk)
+                # --- DEBUG PRINT: Verify actual rows inserted by Oracle ---
+                #print(f"!!! DB_OP: executemany success. Rows affected: {cursor.rowcount}")
                 conn.commit()
             except oracledb.Error as exc:
                 conn.rollback()
@@ -164,6 +165,8 @@ class DbOperator:
         for row in chunk:
             try:
                 cursor.execute(sql, row)
+                # --- DEBUG PRINT: Verify actual rows inserted by Oracle ---
+                #print(f"!!! DB_OP: individual execute success. Row affected: {cursor.rowcount}")
                 conn.commit()
             except oracledb.Error as exc:
                 conn.rollback()
@@ -175,7 +178,6 @@ class DbOperator:
             self._pool.close()
             self._pool = None
             logger.info("Connection pool closed.")
-
 
 # Expose singleton instance
 db = DbOperator()
