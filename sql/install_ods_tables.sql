@@ -214,3 +214,85 @@ EXCEPTION
     END IF;
 END;
 /
+
+-- ... existing code ...
+
+-- =============================================================================
+-- Table: ODS_PRICE_TICK (AFR Tick Data - Idempotent Version with Reset)
+-- =============================================================================
+
+BEGIN
+  -- 1. 尝试删除旧表以确保结构更新 (Reset)
+  EXECUTE IMMEDIATE 'DROP TABLE EQUITY.ODS_PRICE_TICK';
+  DBMS_OUTPUT.PUT_LINE('Table ODS_PRICE_TICK dropped successfully.');
+EXCEPTION
+  WHEN OTHERS THEN
+    IF SQLCODE = -942 THEN
+      DBMS_OUTPUT.PUT_LINE('Table ODS_PRICE_TICK did not exist, proceeding to creation.');
+    ELSE
+      RAISE;
+    END IF;
+END;
+/
+
+BEGIN
+  -- 2. 创建表 (Aligning with ODS design: business columns as VARCHAR2)
+  EXECUTE IMMEDIATE '
+    CREATE TABLE EQUITY.ODS_PRICE_TICK (
+        "CODE"            VARCHAR2(4000 BYTE),
+        "OPEN"            VARCHAR2(4000 BYTE),
+        "HIGH"            VARCHAR2(4000 BYTE),
+        "LOW"             VARCHAR2(4000 BYTE),
+        "CLOSE"           VARCHAR2(4000 BYTE),
+        "TICK_TIME"       VARCHAR2(4000 BYTE),
+        "BATCH_ID"        VARCHAR2(50)   NOT NULL, 
+        "LOAD_TIME"       VARCHAR2(50)   NOT NULL,
+        "RECORD_DTS"      TIMESTAMP WITH LOCAL TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    )';
+  DBMS_OUTPUT.PUT_LINE('Table ODS_PRICE_TICK created successfully.');
+EXCEPTION
+  WHEN OTHERS THEN
+    IF SQLCODE = -955 THEN
+      DBMS_OUTPUT.PUT_LINE('Table ODS_PRICE_TICK already exists, skipping creation.');
+    ELSE
+      RAISE; 
+    END IF;
+END;
+/
+
+-- 索引创建
+BEGIN
+  EXECUTE IMMEDIATE 'CREATE INDEX EQUITY.IDX_ODS_TICK_BATCH ON EQUITY.ODS_PRICE_TICK("BATCH_ID")';
+EXCEPTION
+  WHEN OTHERS THEN
+    IF SQLCODE = -955 THEN 
+      DBMS_OUTPUT.PUT_LINE('Index IDX_ODS_TICK_BATCH already exists, skipping.');
+    ELSE
+      RAISE;
+    END IF;
+END;
+/
+
+BEGIN
+  EXECUTE IMMEDIATE 'CREATE INDEX EQUITY.IDX_ODS_TICK_CODE ON EQUITY.ODS_PRICE_TICK("CODE")';
+EXCEPTION
+  WHEN OTHERS THEN
+    IF SQLCODE = -955 THEN 
+      DBMS_OUTPUT.PUT_LINE('Index IDX_ODS_TICK_CODE already exists, skipping.');
+    ELSE
+      RAISE;
+    END IF;
+END;
+/
+
+BEGIN
+  EXECUTE IMMEDIATE 'CREATE INDEX EQUITY.IDX_ODS_TICK_TIME ON EQUITY.ODS_PRICE_TICK("TICK_TIME")';
+EXCEPTION
+  WHEN OTHERS THEN
+    IF SQLCODE = -955 THEN 
+      DBMS_OUTPUT.PUT_LINE('Index IDX_ODS_TICK_TIME already exists, skipping.');
+    ELSE
+      RAISE;
+    END IF;
+END;
+/
