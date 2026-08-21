@@ -337,3 +337,117 @@ EXCEPTION WHEN OTHERS THEN
   IF SQLCODE != -955 THEN RAISE; END IF;
 END;
 /
+
+-- =============================================================================
+-- Table: ODS_ANALYST_TRENDS (Analyst Recommendation Distribution - Idempotent)
+-- =============================================================================
+
+BEGIN
+  -- 1. Reset: Drop table if exists to ensure schema alignment
+  EXECUTE IMMEDIATE 'DROP TABLE EQUITY.ODS_ANALYST_TRENDS';
+  DBMS_OUTPUT.PUT_LINE('Table ODS_ANALYST_TRENDS dropped successfully.');
+EXCEPTION
+  WHEN OTHERS THEN
+    IF SQLCODE = -942 THEN
+      DBMS_OUTPUT.PUT_LINE('Table ODS_ANALYST_TRENDS did not exist, proceeding to creation.');
+    ELSE
+      RAISE;
+    END IF;
+END;
+/
+
+BEGIN
+  -- 2. Create Table: Time-series distribution of ratings
+  EXECUTE IMMEDIATE '
+    CREATE TABLE EQUITY.ODS_ANALYST_TRENDS (
+        "CODE"            VARCHAR2(4000 BYTE), 
+        "MONTH_DATE"      VARCHAR2(4000 BYTE), 
+        "STRONG_BUY"      VARCHAR2(4000 BYTE), 
+        "BUY"             VARCHAR2(4000 BYTE), 
+        "HOLD"            VARCHAR2(4000 BYTE), 
+        "SELL"            VARCHAR2(4000 BYTE), 
+        "STRONG_SELL"     VARCHAR2(4000 BYTE), 
+        "BATCH_ID"        VARCHAR2(50)   NOT NULL, 
+        "LOAD_TIME"       VARCHAR2(50)   NOT NULL,
+        "RECORD_DTS"      TIMESTAMP WITH LOCAL TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    )';
+  DBMS_OUTPUT.PUT_LINE('Table ODS_ANALYST_TRENDS created successfully.');
+EXCEPTION
+  WHEN OTHERS THEN
+    IF SQLCODE = -955 THEN
+      DBMS_OUTPUT.PUT_LINE('Table ODS_ANALYST_TRENDS already exists, skipping creation.');
+    ELSE
+      RAISE; 
+    END IF;
+END;
+/
+
+-- Indexing for performance and audit
+BEGIN
+  EXECUTE IMMEDIATE 'CREATE INDEX EQUITY.IDX_ODS_ANLYST_TRND_BATCH ON EQUITY.ODS_ANALYST_TRENDS("BATCH_ID")';
+  EXECUTE IMMEDIATE 'CREATE INDEX EQUITY.IDX_ODS_ANLYST_TRND_CODE ON EQUITY.ODS_ANALYST_TRENDS("CODE")';
+EXCEPTION
+  WHEN OTHERS THEN
+    IF SQLCODE = -955 THEN 
+      DBMS_OUTPUT.PUT_LINE('Indexes for ODS_ANALYST_TRENDS already exist, skipping.');
+    ELSE
+      RAISE;
+    END IF;
+END;
+/
+
+-- =============================================================================
+-- Table: ODS_ANALYST_TARGETS (Analyst Price Targets - Idempotent)
+-- =============================================================================
+
+BEGIN
+  -- 1. Reset: Drop table if exists to ensure schema alignment
+  EXECUTE IMMEDIATE 'DROP TABLE EQUITY.ODS_ANALYST_TARGETS';
+  DBMS_OUTPUT.PUT_LINE('Table ODS_ANALYST_TARGETS dropped successfully.');
+EXCEPTION
+  WHEN OTHERS THEN
+    IF SQLCODE = -942 THEN
+      DBMS_OUTPUT.PUT_LINE('Table ODS_ANALYST_TARGETS did not exist, proceeding to creation.');
+    ELSE
+      RAISE;
+    END IF;
+END;
+/
+
+BEGIN
+  -- 2. Create Table: Point-in-time price target consensus
+  EXECUTE IMMEDIATE '
+    CREATE TABLE EQUITY.ODS_ANALYST_TARGETS (
+        "CODE"            VARCHAR2(4000 BYTE), 
+        "TARGET_LOW"      VARCHAR2(4000 BYTE), 
+        "TARGET_HIGH"     VARCHAR2(4000 BYTE), 
+        "TARGET_MEAN"     VARCHAR2(4000 BYTE), 
+        "TARGET_MEDIAN"    VARCHAR2(4000 BYTE), 
+        "BATCH_ID"        VARCHAR2(50)   NOT NULL, 
+        "LOAD_TIME"       VARCHAR2(50)   NOT NULL,
+        "RECORD_DTS"      TIMESTAMP WITH LOCAL TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    )';
+  DBMS_OUTPUT.PUT_LINE('Table ODS_ANALYST_TARGETS created successfully.');
+EXCEPTION
+  WHEN OTHERS THEN
+    IF SQLCODE = -955 THEN
+      DBMS_OUTPUT.PUT_LINE('Table ODS_ANALYST_TARGETS already exists, skipping creation.');
+    ELSE
+      RAISE; 
+    END IF;
+END;
+/
+
+-- Indexing for performance and audit
+BEGIN
+  EXECUTE IMMEDIATE 'CREATE INDEX EQUITY.IDX_ODS_ANLYST_TGT_BATCH ON EQUITY.ODS_ANALYST_TARGETS("BATCH_ID")';
+  EXECUTE IMMEDIATE 'CREATE INDEX EQUITY.IDX_ODS_ANLYST_TGT_CODE ON EQUITY.ODS_ANALYST_TARGETS("CODE")';
+EXCEPTION
+  WHEN OTHERS THEN
+    IF SQLCODE = -955 THEN 
+      DBMS_OUTPUT.PUT_LINE('Indexes for ODS_ANALYST_TARGETS already exist, skipping.');
+    ELSE
+      RAISE;
+    END IF;
+END;
+/
