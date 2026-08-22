@@ -38,10 +38,11 @@ Adopts standardized naming driven by data domains and business entities. Busines
 | **`ODS_PRICE_OHLCV`** | Yahoo 60d/1h K-line price data | `(CODE, RAW_TIMESTAMP)` |
 | **`ODS_PRICE_TICK`** | AFR real-time tick-level granular price | `(CODE, TICK_TIME)` |
 | **`ODS_PRICE_QUOTE_EAV`** | AFR real-time quote EAV key-value pairs (bid/ask, valuation, etc.) | `(CODE, TAG, UPDATE_TIME)` |
-| **`ODS_SHORT_POSITIONS`** | Market-wide daily short positions (aligned with implementation) | `(CODE, UPDATE_DATE)` |
+| **`ODS_SHORT_POSITIONS`** | Market-wide daily short positions | `(CODE, UPDATE_DATE)` |
 | **`ODS_MARKET_ANNC`** | ASX official company announcements and news | `(CODE, "DATE", TITLE)` |
 | **`ODS_COMPANY_MASTER`** | Market-wide company master data (code, sector, market cap) via API CSV export | `(CODE, UPDATE_DATE)` |
-| **`ODS_ANALYST_CONSENSUS`** | Broker and analyst consensus ratings | `(CODE, UPDATE_DATE)` |
+| **`ODS_ANALYST_TRENDS`** | Analyst rating trends & consensus (Yahoo API) | `(CODE, UPDATE_DATE)` |
+| **`ODS_ANALYST_TARGETS`** | Analyst price targets & valuation (Yahoo API) | `(CODE, UPDATE_DATE)` |
 
 ---
 
@@ -49,5 +50,6 @@ Adopts standardized naming driven by data domains and business entities. Busines
 - **Pre-close (Pre-market / Near close ~15:25 Mon-Fri)**: Collects afr + quote near-closing prices for intra-day signal calculation.
 - **Post-close (Post-market settlement ~16:45 onwards Mon-Fri)**: Sequentially collects afr + quote settlement prices, shortman shorting data (`ODS_SHORT_POSITIONS`), and annc company announcements.
 - **Weekly (Weekend Sat 06:00 / Sun 07:00)**:
-  - Fetches `ODS_COMPANY_MASTER` master data via **API CSV Export** (optimized from Selenium for zero-browser memory footprint) and collects `ODS_ANALYST_CONSENSUS` broker ratings via Selenium.
+  - Fetches `ODS_COMPANY_MASTER` master data via **API CSV Export** (optimized from Selenium for zero-browser memory footprint).
+  - Collects Analyst Trends and Targets via **Yahoo API** (writing to `ODS_ANALYST_TRENDS` and `ODS_ANALYST_TARGETS` in a single job).
   - Executes VM bash + crontab scheduled reboot task.

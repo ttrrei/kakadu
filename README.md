@@ -1,9 +1,4 @@
-*   Original Code: `# kakadu`
-    *   Suggested Edit: A comprehensive README-style markdown content.
-    *   Instruction: Apply the suggested edit to the original code. Output the complete modified file. Output ONLY code.
-
-    *   The original code is just a single comment `# kakadu`.
-    *   The suggested edit replaces this with a detailed project description.# Kakadu: Systematic Equity Intelligence & Decision Support Engine
+# Kakadu: Systematic Equity Intelligence & Decision Support Engine
 
 **Kakadu** is an ultra-lean, high-resilience **systematic equity intelligence and quantitative decision support engine** built for the Australian Securities Exchange (ASX).
 
@@ -13,7 +8,7 @@ Designed to operate under extreme hardware and resource constraints (**OCI Micro
 
 ## Core Value Proposition
 
-* **Automated Data Foundation**: Ingests full-market ASX data across multiple domains, including Tick, OHLCV, Short Positions, Market Announcements, and Analyst Consensus.
+* **Automated Data Foundation**: Ingests full-market ASX data across multiple domains, including Tick, OHLCV, Short Positions, Market Announcements, and Analyst Consensus (Trends & Targets).
 * **Quantitative Signal Generation**: Computes technical indicators (EMA, PSAR, Supertrend) natively within the database engine to yield high-confidence intra-day and post-close trading signals.
 * **Ultra-Lean Self-Healing Architecture**: Embraces a "Thin-Edge, Thick-Core" philosophy to ensure 24/7 unattended reliability within a strict 1GB RAM footprint.
 
@@ -52,7 +47,8 @@ The Kakadu project repository is structured around 4 core living documents:
 | **`ODS_SHORT_POSITION`** | Shortman daily market-wide short positions | Daily Post-close | `(CODE, UPDATE_DATE)` |
 | **`ODS_MARKET_ANNC`** | ASX official company announcements & news | Daily Morning | `(CODE, "DATE", TITLE)` |
 | **`ODS_COMPANY_MASTER`** | Market-wide company master data (Sector, Market Cap) | Weekly Batch (Sat 06:00) | `(CODE, UPDATE_DATE)` |
-| **`ODS_ANALYST_CONSENSUS`** | Broker & analyst consensus ratings | Weekly Batch (Sun 07:00) | `(CODE, UPDATE_DATE)` |
+| **`ODS_ANALYST_TRENDS`** | Analyst rating trends & consensus (Yahoo API) | Weekly Batch (Sun 07:00) | `(CODE, UPDATE_DATE)` |
+| **`ODS_ANALYST_TARGETS`** | Analyst price targets & valuation (Yahoo API) | Weekly Batch (Sun 07:00) | `(CODE, UPDATE_DATE)` |
 
 ---
 
