@@ -11,13 +11,13 @@ Kakadu is an ultra-lightweight quantitative data collection and indicator calcul
 
 ## 2. Phased Implementation Strategy
 
-```text
+```
 [Phase 1: Infra & DB] ──> [Phase 2: Scraper Iteration] ──> [Phase 3: Automation] ──> [Phase 4: Thick-Core]
 ```
 
 ### Phase 1: Infrastructure & DB Operator
 
-Goal: Establish stable database connectivity, pure-INSERT persistence mechanisms, and local/cloud backup pathways.
+**Goal**: Establish stable database connectivity, pure-INSERT persistence mechanisms, and local/cloud backup pathways.
 
 - [ ] 1.1 Environment Setup: Configure .env environment variables, deploy Oracle mTLS Wallet, and verify python-oracledb Thin Mode connectivity (execute SELECT 1 FROM DUAL).
 
@@ -29,7 +29,7 @@ Goal: Establish stable database connectivity, pure-INSERT persistence mechanisms
 
 ### Phase 2: Iterative Scraper Development & Regression Test
 
-Goal: Develop each data source individually, with full end-to-end regression testing and 1GB RAM stress verification upon completion of each.
+**Goal**: Develop each data source individually, with full end-to-end regression testing and 1GB RAM stress verification upon completion of each.
 
 - [ ] 2.1 Extractor #1: price_ohlcv (Yahoo/ASX API) Implement unified OHLCV data collection (Real-time/EOD/History) with pre-close and post-close independent scraping parameter handling (--session-type). Regression test: API fetch → JSONL backup → ODS_PRICE_OHLCV pure-INSERT write → OCI comparison.
 
@@ -45,7 +45,7 @@ Goal: Develop each data source individually, with full end-to-end regression tes
 
 ### Phase 3: Scheduling, Isolation & Anti-Crash
 
-Goal: Achieve unattended automated scheduling, ensuring long-term stable operation without crashes.
+**Goal**: Achieve unattended automated scheduling, ensuring long-term stable operation without crashes.
 
 - [ ] 3.1 Crontab Event-Driven Schedules: Configure AEST pre-market (15:25) and post-market (16:45) separate scheduling commands. Configure weekly (Sat/Sun) static data updates and Cron pipelines.
 
@@ -53,15 +53,15 @@ Goal: Achieve unattended automated scheduling, ensuring long-term stable operati
 
 - [ ] 3.3 Two-Tier Anti-Noise Alerting: Integrate Pushover alerting using a two-tier strategy aligned with BRD's "High-Tolerance Anti-False-Alarm" principle:
 
-Tier 1 (Warning Log): Single batch row-count mismatch between local JSONL backup and database write → log to file, retain backup. No Pushover notification.
+  - **Tier 1 (Warning Log)**: Single batch row-count mismatch between local JSONL backup and database write → log to file, retain backup. No Pushover notification.
 
-Tier 2 (Pushover Alert): Cumulative retry failures OR bulk data missingness across multiple batches/sources → triggers Pushover to on-call.
+  - **Tier 2 (Pushover Alert)**: Cumulative retry failures OR bulk data missingness across multiple batches/sources → triggers Pushover to on-call.
 
-Rationale: Prevents alert fatigue from transient single-batch hiccups while ensuring serious systemic issues escalate immediately.
+  **Rationale**: Prevents alert fatigue from transient single-batch hiccups while ensuring serious systemic issues escalate immediately.
 
 ### Phase 4: Thick-Core PL/SQL Analytics Engine
 
-Goal: Push data cleaning, deduplication, and quantitative indicator calculations entirely to the Oracle database.
+**Goal**: Push data cleaning, deduplication, and quantitative indicator calculations entirely to the Oracle database.
 
 - [ ] 4.1 ODS Cleaning & Deduplication Procedures: Write PL/SQL stored procedures to clean append-only ODS_* text data, perform type conversion (VARCHAR2 → NUMBER/DATE), and deduplicate by primary key with latest timestamp into CORE_* tables.
 
