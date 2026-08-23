@@ -21,6 +21,12 @@
 - Config: Zero hardcoded URLs/Keys. Use config.yaml for settings and .env for secrets.
 - Stateless: Scrapers must not hold state/data in memory between different tasks or symbols.
 
+## Known Anti-Patterns to Resolve
+- [ ] **Orchestration Bypass**: Ensure no scraper (e.g., ConsensusScraper) implements its own `.run()` or calls `db.insert_batch` directly.
+- [ ] **Driver Leaks**: Ensure no scraper requires `driver` as an argument in its public methods; all driver management must be internal to `.run()`.
+- [ ] **Hardcoded URLs**: Move all API endpoints and URLs from Python code to `config.yaml`.
+- [ ] **Backup Gap**: Verify that every single DB write is preceded by a `backup_manager.save_local()` call.
+
 ## Audit Status
 - base_scraper.py: [ ]
 - db_operator.py: [ ]
