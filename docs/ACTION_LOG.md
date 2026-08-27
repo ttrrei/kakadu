@@ -310,6 +310,55 @@ Implement a tiered architecture to ensure separation of concerns and data integr
 
 ---
 
+### ADR-012: Centralized Symbol Provider for Iterative Scrapers
+
+| Field | Value |
+|---|---|
+| **Status** | Approved |
+| **Date** | 2026-08-27 |
+
+#### 1. Background
+
+Iterative scrapers (e.g., afr, short, annc, analyst_consensus) require a list of symbols to process individually. Early designs risked:
+
+- Hardcoded symbol lists (violating config isolation)
+- Per-scraper DB queries (creating tight coupling and duplication)
+- In-memory symbol lists (risking OOM on 1GB VM with ~2000+ ASX symbols)
+
+This violates the "Thin-Edge" principle and introduces memory, coupling, and maintenance risks.
+
+#### 2. Decision
+
+**ADR-012.1: Centralized SymbolProvider Interface**
+- Introduce a SymbolProvider abstraction (or equivalent logic in BaseScraper) responsible for supplying symbols to iterative scrapers
+- Must fetch symbols as a generator/iterator from `ODS_COMPANY_MASTER` via `DbOperator` — never load full list into memory
+- Apply optional filtering (via `config.yaml`) and validation (e.g., `.AX` suffix, non-empty) at the provider level
+- Scrapers depend only on an `Iterable[str]`, not on database or query specifics
+
+**ADR-012.2: Integration with BaseScraper**
+- `BaseScraper` (in iterative mode) retrieves symbols via `self.symbol_provider()` or config-injected provider
+- Each `scrape_one(symbol)` call is wrapped in try-except to isolate failures
+- Symbol-level errors are logged and skipped; job continues to next symbol
+
+**ADR-012.3: Configuration & Validation**
+- Symbol filtering (e.g., by sector, exclusion lists) configured in `config.yaml` under `[symbol_filter]`
+- `main.py` validates SymbolProvider health at startup: must connect to DB and yield at least one symbol
+- Invalid symbols logged at WARNING; provider failure triggers Tier 2 alert and graceful shutdown
+
+#### 3. Consequences
+
+| Description |
+|---|
+| **Memory Safety** | Symbol iteration uses O(1) memory; no risk of OOM from large symbol lists |
+| **Loose Coupling** | Scrapers unaware of symbol source; easy to test/mock |
+| **Single Source of Truth** | All iterative scrapers use the same, fresh ticker list from ODS_COMPANY_MASTER |
+| **Config-Driven** | Filtering and validation centralized, not scattered in scraper logic |
+| **Observability** | Symbol count per job logged at INFO level for anomaly detection |
+
+**Next Step**: Implement SymbolProvider in `src/symbol_provider.py` or integrate into BaseScraper, update `base_scraper.py` to use it, and ensure all iterative scrapers inherit the behavior.
+
+---
+
 ## 4. Implementation Progress (Current State)
 
 ### Foundation Layer (Completed)
@@ -318,6 +367,7 @@ Implement a tiered architecture to ensure separation of concerns and data integr
 - **Database Operator**: Implemented src/db_operator.py as a Pure-INSERT engine with automatic audit injection (BATCH_ID, LOAD_TIME) and row-level fallback per ADR-005
 - **Schema Initialization**: Created sql/install_equity_schema.sql establishing the EQUITY user, SYS_BATCH_LOG, and core ADB privileges
 - **Scraper Framework**: Implemented src/base_scraper.py using the Template Method pattern, supporting both Bulk and Iterative modes with built-in Selenium lifecycle management per ADR-008
+- **Symbol Provider**: Implemented centralized SymbolProvider for iterative scrapers per ADR-012
 
 ### Current Focus
 
