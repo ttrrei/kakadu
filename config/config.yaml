@@ -1,43 +1,88 @@
-# ============================================
-# Kakadu - Non-Sensitive Configuration
-# ============================================
+# ==============================================================================
+# Kakadu - System Configuration
+# Aligned with ADR-005, 006, 008, 009, 011, 012
+# ==============================================================================
 
-# --- ODS Tables ---
-tables:
-  ohlcv: ODS_PRICE_OHLCV
-  tick: ODS_PRICE_TICK
-  quote_eav: ODS_PRICE_QUOTE_EAV
-  short_position: ODS_SHORT_POSITION
-  market_annc: ODS_MARKET_ANNC
-  company_master: ODS_COMPANY_MASTER
-  analyst_consensus: ODS_ANALYST_CONSENSUS
+# --- Global System Settings ---
+system:
+  log_level: "INFO"
+  backup_dir: "/home/ubuntu/backup/"
+  # Physical VM reboot is handled via crontab
 
-# --- Data Sources ---
-sources:
-  yahoo:
-    base_url: https://query1.finance.yahoo.com
-    history_days: 60
-    interval: 1h
+oci:
+  enabled: true # 控制是否执行 sync_to_cloud
+
+# --- Database Operator Settings (ADR-005) ---
+database:
+  # Pure-INSERT batch size (5-10 records) to maintain flat RAM footprint
+  insert_batch_size: 10 
+  connection_timeout: 30
+
+# --- Scraper-Specific Configurations ---
+# This section allows each scraper to be configured independently
+scrapers:
+  # Extractor #5: Ticker Universe (API CSV)
+  company_master:
+    url: "https://asx.api.markitdigital.com/asx-research/1.0/companies/directory/file" # verified
+    target_table: "ODS_COMPANY_MASTER" # verified
+    is_bulk: true # verified
+    needs_driver: false # verified
+
+  # Extractor #1: OHLCV (Merged Yahoo/ASX)
+  price_ohlcv:
+    url: "" # To be filled during price_ohlcv audit
+    target_table: "ODS_PRICE_OHLCV"
+    is_bulk: true
+    needs_driver: false
+    batch_size: 50
+
+  # Extractor #2: AFR Quote & Tick
   afr:
-    base_url: https://api.afr.com
-  asx:
-    base_url: https://www.asx.com.au
-  shortman:
-    base_url: https://api.shortman.com.au
+    url: "" # To be filled during afr audit
+    target_tables: 
+      tick: "ODS_PRICE_TICK"
+      quote: "ODS_PRICE_QUOTE_EAV"
+    is_bulk: false
+    needs_driver: false
+    batch_size: 50
 
-# --- Backup ---
-backup:
-  local_path: /home/ubuntu/backup
-  oci_enabled: true
+  # Extractor #3: Shortman
+  short:
+    url: "" # To be filled during short audit
+    target_table: "ODS_SHORT_POSITION"
+    is_bulk: false
+    needs_driver: false
+    batch_size: 50
 
-# --- Ingestion ---
-ingestion:
-  batch_size: 10
-  retry_attempts: 3
-  retry_delay_seconds: 5
+  # Extractor #4: ASX Announcements (Selenium)
+  annc:
+    url: "https://www.asx.com.au/markets/company/"
+    target_table: "ODS_MARKET_ANNC"
+    is_bulk: false
+    needs_driver: true
+    batch_size: 20 # Smaller batch to prevent Selenium OOM
 
-# --- Logging ---
-logging:
-  level: INFO
-  file_path: /home/ubuntu/logs/kakadu.log
-  rotation: daily
+  # Extractor #6: Analyst Consensus (Split per ADR-011)
+  analyst_consensus:
+    url: "" # To be filled during analyst_consensus audit
+    target_tables:
+      trends: "ODS_ANALYST_TRENDS"
+      targets: "ODS_ANALYST_TARGETS"
+    is_bulk: false
+    needs_driver: false
+    batch_size: 50
+
+# --- Centralized Symbol Provider Filtering (ADR-012) ---
+# Used by SymbolProvider to filter ODS_COMPANY_MASTER generator
+symbol_filter:
+  include_sectors: []      # e.g., ['Mining', 'Finance']
+  exclude_symbols: []     # e.g., ['TEST.AX']
+  require_suffix: ".AX"
+  min_market_cap: 0        # Minimum market cap to include in iteration
+
+# --- Alerting Strategy (SAD Section 6) ---
+alerting:
+  # Tier 1: Warning Log (Internal)
+  # Tier 2: Pushover Notification (External)
+  notification_level: "tier_2" 
+  retry_limit: 3

@@ -359,6 +359,33 @@ This violates the "Thin-Edge" principle and introduces memory, coupling, and mai
 
 ---
 
+### ADR-013: Cloud Backup Path Prefixing (Bucket Organization)
+
+| Field | Value |
+|---|---|
+| **Status** | Approved |
+| **Date** | 2026-08-28 |
+
+#### 1. Background
+Initially, the `BackupManager` uploaded ZIP files to the root of the OCI Object Storage bucket using only the timestamp as the filename. As the system scales to multiple data sources (OHLCV, Short, Annc, etc.), storing all backups in a flat root directory would lead to thousands of indistinguishable files, making data recovery and lifecycle management impossible.
+
+#### 2. Decision
+Implement a hierarchical prefixing strategy for all cloud uploads to simulate a folder structure within the flat OCI Object Storage.
+
+**Path Pattern**: `{ODS_TABLE_NAME}/{YYYY-MM-DD}/{TIMESTAMP}.zip`
+
+**Implementation Details**:
+- The `BaseScraper` now constructs a `cloud_path` by combining the target table name, current date, and the generated filename.
+- This `cloud_path` is passed to `BackupManager.sync_to_cloud()`, which appends it to the PAR URL.
+
+#### 3. Consequences
+| Description |
+|---|
+| **Pros** | High observability in OCI Console; enables table-level and date-level data recovery; aligns with Data Lake storage standards. |
+| **Cons** | Slight increase in logic complexity within `BaseScraper` to handle path construction. |
+
+---
+
 ## 4. Implementation Progress (Current State)
 
 ### Foundation Layer (Completed)
