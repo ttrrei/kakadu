@@ -30,11 +30,22 @@ scrapers:
 
   # Extractor #1: OHLCV (Merged Yahoo/ASX)
   price_ohlcv:
-    url: "" # To be filled during price_ohlcv audit
-    target_table: "ODS_PRICE_OHLCV"
-    is_bulk: true
+    # 基础设置
+    base_url: "https://query2.finance.yahoo.com/v8/finance/chart/" # 基础域名
+    is_bulk: false
     needs_driver: false
     batch_size: 50
+    
+    # Session 矩阵
+    sessions:
+      pre_close:
+        target_table: "ODS_PRICE_OHLCV_PRE"
+        interval: "1h"
+        range: "1d"
+      post_close:
+        target_table: "ODS_PRICE_OHLCV_POST"
+        interval: "1h"
+        range: "3d"
 
   # Extractor #2: AFR Quote & Tick
   afr:
