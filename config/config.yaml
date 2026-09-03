@@ -7,6 +7,7 @@
 system:
   log_level: "INFO"
   backup_dir: "/home/ubuntu/backup/"
+  max_workers: 20
   # Physical VM reboot is handled via crontab
 
 oci:
@@ -32,9 +33,11 @@ scrapers:
   price_ohlcv:
     # 基础设置
     base_url: "https://query2.finance.yahoo.com/v8/finance/chart/" # 基础域名
+    symbol_source: "EQUITY.VW_TOP_100_COMPANIES"
     is_bulk: false
     needs_driver: false
     batch_size: 50
+    max_workers: 20
     
     # Session 矩阵
     sessions:

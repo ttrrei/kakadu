@@ -8,33 +8,40 @@ import re
 import logging
 from typing import Iterator, Optional
 from src.db_operator import DbOperator
-from src.config import config  # Unified config object (yaml + env)
+from src.config import config
 
 logger = logging.getLogger(__name__)
 
 class SymbolProvider:
     """
-    Centralized Symbol Provider that fetches symbols as a generator from ODS_COMPANY_MASTER
-    via DbOperator, applying config-driven filtering and validation.
+    Centralized Symbol Provider that fetches symbols as a generator from a specified table.
     
     Ensures O(1) memory usage by yielding symbols one at a time.
     """
     
-    def __init__(self, db_operator: Optional[DbOperator] = None):
+    def __init__(self, db_operator: Optional[DbOperator] = None, source_table: str = None):
         """
-        Initialize SymbolProvider with optional DbOperator dependency injection.
+        Initialize SymbolProvider.
+        
+        Args:
+            db_operator: Optional DbOperator dependency.
+            source_table: The table to fetch symbols from. MUST be provided.
         """
         self.config = config 
         self.db_operator = db_operator or DbOperator()
         
-        # The regex pattern is defined dynamically in _load_filter_config
+        # --- 强制校验：必须提供 source_table ---
+        if not source_table:
+            raise KeyError("SymbolProvider requires 'source_table' to be explicitly provided.")
+            
+        self._source_table = source_table
         self._symbol_pattern = None
         
-        # Load filtering configuration from config.yaml
+        # Load filtering configuration (Global filters are still used for validation)
         self._load_filter_config()
     
     def _load_filter_config(self):
-        """Load symbol filtering configuration from config.yaml."""
+        """Load symbol filtering configuration from global symbol_filter in config.yaml."""
         filter_cfg = self.config.get('symbol_filter', {})
         
         if not isinstance(filter_cfg, dict):
@@ -48,22 +55,13 @@ class SymbolProvider:
         # 2. Suffix Configuration (e.g., '.AX')
         self._required_suffix = filter_cfg.get('require_suffix', '.AX')
         
-        # 3. Dynamic Regex: Ensure the symbol ends with the configured suffix
+        # 3. Dynamic Regex
         escaped_suffix = re.escape(self._required_suffix)
         self._symbol_pattern = re.compile(rf'^[A-Z0-9.\-]+{escaped_suffix}$')
-        
-        # 4. Source Table
-        self._source_table = filter_cfg.get('source_table', "ODS_COMPANY_MASTER")
     
     def get_target_symbols(self) -> Iterator[str]:
         """
-        Fetch symbols as a generator from the configured source table via DbOperator.
-        
-        Handles the conversion from DB-clean symbols (e.g., 'CBA') 
-        to API-ready symbols (e.g., 'CBA.AX').
-        
-        Yields:
-            str: Validated and formatted symbol strings (O(1) memory usage)
+        Fetch symbols as a generator from the configured source table.
         """
         conn = None
         cursor = None
@@ -89,20 +87,17 @@ class SymbolProvider:
                 if not symbol:
                     continue
                 
-                # 1. Apply inclusion/exclusion filters (on the raw DB symbol)
+                # 1. Apply filters
                 if not self._passes_filters(symbol):
-                    logger.debug(f"SymbolProvider: Symbol {symbol} filtered out by config.")
                     continue
                 
                 # 2. Dynamic Suffix Completion
-                # If the DB symbol doesn't already have the suffix (e.g., 'CBA' -> 'CBA.AX')
                 formatted_symbol = symbol
                 if not symbol.endswith(self._required_suffix):
                     formatted_symbol = f"{symbol}{self._required_suffix}"
                 
                 # 3. Final Validation
                 if not self._is_valid_symbol(formatted_symbol):
-                    logger.warning(f"SymbolProvider: Skipping invalid symbol format: {formatted_symbol}")
                     continue
                 
                 yielded_count += 1
@@ -120,30 +115,15 @@ class SymbolProvider:
                 self.db_operator._pool.release(conn)
     
     def _passes_filters(self, symbol: str) -> bool:
-        """Check if symbol passes configured filters."""
         if self._use_included_only and symbol not in self._included_symbols:
             return False
-            
         if symbol in self._excluded_symbols:
             return False
-            
         return True
     
     def _is_valid_symbol(self, symbol: str) -> bool:
-        """Validate symbol format (must match regex and minimum length)."""
         if not self._symbol_pattern.match(symbol):
             return False
-            
         if len(symbol) < 4: 
             return False
-            
         return True
-
-def get_symbol_provider() -> SymbolProvider:
-    """Factory function to get a SymbolProvider instance."""
-    return SymbolProvider()
-
-def get_target_symbols_generator() -> Iterator[str]:
-    """Simple generator function that yields symbols from the configured source table."""
-    provider = SymbolProvider()
-    yield from provider.get_target_symbols()

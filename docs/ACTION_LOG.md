@@ -386,6 +386,86 @@ Implement a hierarchical prefixing strategy for all cloud uploads to simulate a 
 
 ---
 
+### ADR-014: Decoupling Backup and Upload via Dedicated UploadManager
+
+| Field | Value |
+|---|---|
+| **Status** | Approved |
+| **Date** | 2026-08-29 |
+
+#### 1. Background
+
+The current `BackupManager` implementation follows a "Fetch $\rightarrow$ Buffer $\rightarrow$ Flush (Upload)" synchronous cycle. This creates a significant performance bottleneck: the scraper must wait for the OCI Cloud upload to complete before processing the next batch of symbols. Integration tests showed that for ~1,800 symbols, this synchronous I/O overhead accounts for a large portion of the 15.5-minute total execution time, which is unacceptable for "Pre-close" real-time decision support.
+
+#### 2. Decision
+
+Decouple the "Local Persistence" (Backup) from the "Cloud Synchronization" (Upload) by introducing a dedicated `UploadManager` and shifting to a **Batch-Compress-Upload** strategy.
+
+**ADR-014.1: Single Responsibility Refactoring**
+- **`BackupManager`**: Stripped of all cloud-related logic. Its sole responsibility is the high-speed persistence of raw data to the local disk.
+- **`UploadManager`**: A new standalone module responsible for the end-of-job synchronization lifecycle: `Local Folder` $\rightarrow$ `Compression (.zip)` $\rightarrow$ `Single Cloud Upload` $\rightarrow$ `Local Cleanup`.
+
+**ADR-014.2: Shift to Batch-Compress-Upload Pattern**
+- Abandon the "periodic flush" mechanism during the scraping phase.
+- All data for a specific task is written locally first.
+- Once the `main.py` orchestrator confirms all symbols are processed, it triggers the `UploadManager` to compress the entire local directory into a single archive and upload it to OCI Object Storage in one request.
+
+**ADR-014.3: Orchestration via `main.py`**
+- The execution flow is now managed by `main.py` as follows:
+  `SymbolProvider` $\rightarrow$ `Scraper` $\rightarrow$ `BackupManager (Local Write)` $\rightarrow$ `UploadManager (Compress & Sync)` $\rightarrow$ `Purge`.
+
+#### 3. Consequences
+
+| Description |
+|---|
+| **Pros** | **Extreme Speedup**: Scraping speed is now limited by API response and Disk I/O, not Network Latency. **Reduced API Overhead**: Minimizes the number of connections to OCI. **Improved Reliability**: Local files serve as a fail-safe buffer if the cloud upload fails. |
+| **Cons** | **Latency**: Cloud data is only available after the entire job completes, not in real-time. **Disk Usage**: Temporary increase in local disk usage until the final purge. |
+
+---
+
+### ADR-015: Architecture Upgrade — Dynamic Configuration-Driven Identity and Decoupled Symbol Sourcing
+
+| Field | Value |
+|---|---|
+| **Status** | Completed |
+| **Date** | 2024-XX-XX |
+
+#### 1. Background
+
+The original `BaseScraper` and `SymbolProvider` adopted a global single-configuration pattern. All scrapers shared the same `max_workers` setting and the same symbol source table (`ODS_COMPANY_MASTER`). This led to two critical issues:
+
+1. **Resource Runaway**: No ability to set different concurrency levels for API scrapers (lightweight) vs. Selenium scrapers (heavyweight), easily causing OCI micro VM memory overflow.
+2. **Data Coupling**: No ability to specify different symbol source tables for scrapers targeting different markets, limiting multi-market extensibility.
+
+#### 2. Decision
+
+Introduce the **"Identity-based Configuration"** pattern to completely decouple scraper runtime parameters from symbol sources.
+
+**2.1 Dynamic Configuration Loading Mechanism**
+- Introduce a `scraper_name` attribute in `BaseScraper`.
+- Implement hierarchical configuration read priority: `Scraper-specific config` $\rightarrow$ `Global system config` $\rightarrow$ `Code default values`.
+- Enforce that every scraper must define `symbol_source` in `config.yaml`; missing config throws `KeyError` at startup.
+
+**2.2 Decoupled SymbolProvider**
+- Refactor `SymbolProvider` from a static function approach to an instance-based model.
+- `BaseScraper` dynamically instantiates `SymbolProvider(source_table=...)` based on its own configuration.
+- Implement full parameterization of the `Fetch -> Local Backup -> DB Insert` pipeline.
+
+#### 3. Consequences
+
+| Description |
+|---|
+| **Pros**: **High Flexibility**: Each scraper can independently configure concurrency and symbol table; **Strong Robustness**: Mandatory validation at startup prevents runtime crashes from missing config; **Scalability**: Adding new market scrapers requires no core code changes, only YAML updates. |
+| **Cons**: Every new scraper subclass must define the `scraper_name` attribute. |
+
+#### 4. Implementation Details
+- **`src/base_scraper.py`**: Refactor `__init__` and `_run_iterative` to implement dynamic config loading and `SymbolProvider` instantiation.
+- **`src/symbol_provider.py`**: Upgrade `SymbolProvider` to a configurable class, remove global static generator.
+- **`src/scrapers/yahoo_scraper.py`**: Define `scraper_name = "price_ohlcv"` and simplify initialization logic.
+- **`test/`**: Update `test_base_scraper.py` and `test_symbol_provider.py` to validate priority logic and mandatory enforcement.
+
+---
+
 ## 4. Implementation Progress (Current State)
 
 ### Foundation Layer (Completed)

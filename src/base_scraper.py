@@ -5,6 +5,7 @@ import os
 from datetime import datetime
 from abc import ABC, abstractmethod
 from typing import Any, List, Dict, Optional, Union
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -12,36 +13,35 @@ from selenium.webdriver.chrome.options import Options
 from .db_operator import db as db_operator
 from .backup_manager import BackupManager
 from .config import config
-from .symbol_provider import get_target_symbols_generator
+from .symbol_provider import SymbolProvider # 修改：导入类而非函数
 
 logger = logging.getLogger(__name__)
 
 class BaseScraper(ABC):
     """
-    所有爬虫的抽象基类。
-    实现了 '编排者' 模式，负责管理资源生命周期、执行策略（批量 vs 迭代）
-    以及带有强制备份和云同步的数据库写入。
+    Abstract Base Class for all scrapers.
     """
 
     def __init__(self, db_op=db_operator):
         self.db = db_op
         self.config = config
         
-        # 1. 从 config.yaml 注入备份根路径
         backup_path = self.config.get('system', {}).get('backup_dir', '/home/ubuntu/backup')
+        self.backup_manager = BackupManager(base_backup_dir=backup_path)
         
-        # 2. 从 .env (通过 config.env 或 os.getenv) 注入 PAR URL
-        par_url = None
-        if hasattr(self.config, 'env') and self.config.env:
-            par_url = getattr(self.config.env, 'oci_par_url', None)
-        if not par_url:
-            par_url = os.getenv("OCI_PAR_URL")
+        scraper_name = getattr(self, 'scraper_name', None)
+        scraper_cfg = self.config.get(scraper_name, {}) if scraper_name else {}
+        system_cfg = self.config.get('system', {})
+
+        self.batch_size = scraper_cfg.get('batch_size', system_cfg.get('batch_size', 50))
+        self.max_workers = scraper_cfg.get('max_workers', system_cfg.get('max_workers', 1))
         
-        self.backup_manager = BackupManager(backup_root=backup_path, par_url=par_url)
+        if not hasattr(self, 'is_bulk_task'):
+            self.is_bulk_task = scraper_cfg.get('is_bulk', False)
+            
+        if not hasattr(self, 'needs_driver'):
+            self.needs_driver = scraper_cfg.get('needs_driver', True)
         
-        self.is_bulk_task: bool = False
-        self.needs_driver: bool = True
-        self.batch_size: int = 50
         self._driver: Optional[webdriver.Chrome] = None
 
     def _create_driver(self) -> webdriver.Chrome:
@@ -67,7 +67,9 @@ class BaseScraper(ABC):
         try:
             logger.info(f"Starting job {job_name} on table {table_name}...")
             if self.is_bulk_task:
-                if symbols is None: symbols = list(get_target_symbols_generator())
+                if symbols is None: 
+                    # Bulk 模式如果没传 symbols，需要一个默认源，这里建议也改为动态加载
+                    symbols = list(self._get_custom_symbol_generator())
                 self._run_bulk(symbols, table_name, job_name)
             else:
                 self._run_iterative(table_name, job_name)
@@ -80,78 +82,82 @@ class BaseScraper(ABC):
                 self._driver.quit()
                 self._driver = None
 
+    def _get_custom_symbol_generator(self):
+        """
+        Helper to create a SymbolProvider based on current scraper's config.
+        """
+        scraper_name = getattr(self, 'scraper_name', None)
+        scraper_cfg = self.config.get(scraper_name, {}) if scraper_name else {}
+        
+        # --- 强制校验：必须在 yaml 中定义 symbol_source ---
+        symbol_source = scraper_cfg.get('symbol_source')
+        if not symbol_source:
+            raise KeyError(
+                f"Configuration Error: 'symbol_source' is missing for scraper '{scraper_name}'. "
+                f"Please add 'symbol_source: TABLE_NAME' to the {scraper_name} section in config.yaml."
+            )
+            
+        provider = SymbolProvider(source_table=symbol_source)
+        return provider.get_target_symbols()
+
     def _run_bulk(self, symbols: List[str], table_name: str, job_name: str):
         logger.info("Executing in BULK mode...")
         driver = self.get_driver()
         data = self.scrape_all(driver, symbols)
         if data:
-            self._flush_buffer(data, table_name, job_name)
+            self.backup_manager.save_record(table_name, "BULK_EXPORT", data)
+            self.db.insert_batch(table_name, data, batch_id=job_name)
         else:
             logger.warning("No data extracted in bulk mode.")
 
     def _run_iterative(self, table_name: str, job_name: str):
-        logger.info("Executing in ITERATIVE mode...")
-        buffer = []
+        """
+        Optimized Iterative Mode using ThreadPoolExecutor.
+        """
+        logger.info(f"Executing in ITERATIVE mode with {self.max_workers} threads...")
+        
         success_count = 0
         fail_count = 0
         driver = self.get_driver()
 
-        for symbol in get_target_symbols_generator():
-            try:
-                result = self.scrape_one(driver, symbol)
-                if result:
-                    if isinstance(result, list): buffer.extend(result)
-                    elif isinstance(result, dict): buffer.append(result)
-                    success_count += 1
-            except Exception as e:
-                logger.error(f"Failed to scrape symbol {symbol}: {e}")
-                fail_count += 1
-                continue
+        # --- 动态获取符号源 ---
+        symbols = list(self._get_custom_symbol_generator())
+        
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_symbol = {
+                executor.submit(self._process_single_symbol, driver, symbol, table_name, job_name): symbol 
+                for symbol in symbols
+            }
 
-            if len(buffer) >= self.batch_size:
-                self._flush_buffer(buffer, table_name, job_name)
+            for future in as_completed(future_to_symbol):
+                symbol = future_to_symbol[future]
+                try:
+                    result = future.result()
+                    if result:
+                        success_count += 1
+                except Exception as e:
+                    logger.error(f"Critical error processing symbol {symbol}: {e}")
+                    fail_count += 1
 
-        if buffer:
-            self._flush_buffer(buffer, table_name, job_name)
         logger.info(f"Iterative run finished. Success: {success_count}, Failed: {fail_count}")
 
-    def _flush_buffer(self, buffer: List[Any], table_name: str, job_name: str):
-        """
-        核心生命周期管理 (ADR-013):
-        1. 原子备份 (Local ZIP) -> 2. 数据库写入 (Insert) -> 3. 云端同步 (OCI Sync with Prefix) -> 4. 本地清理 (Purge)
-        """
-        # 1. 本地原子备份 (Returns path to .zip)
-        backup_path = self.backup_manager.save_local(table_name, list(buffer))
-        if not backup_path:
-            logger.error(f"Backup failed for {table_name}. Aborting DB insert to prevent data loss.")
-            return
-
+    def _process_single_symbol(self, driver, symbol, table_name, job_name):
         try:
-            # 2. 数据库写入
-            self.db.insert_batch(table_name, list(buffer), batch_id=job_name)
-            
-            # 3. 构建云端路径 (Prefixing per ADR-013)
-            # 格式: TABLE_NAME/YYYY-MM-DD/TIMESTAMP.zip
-            file_name = os.path.basename(backup_path)
-            date_str = datetime.now().strftime("%Y-%m-%d")
-            cloud_path = f"{table_name}/{date_str}/{file_name}"
-            
-            # 4. 云端同步 (If enabled in config.yaml)
-            if self.config.get('oci', {}).get('enabled', False):
-                if self.backup_manager.sync_to_cloud(backup_path, cloud_path):
-                    # 5. 同步成功后清理本地
-                    self.backup_manager.purge_local(backup_path)
-                else:
-                    logger.warning(f"Cloud sync failed for {backup_path}. Local backup retained.")
-            
+            result = self.scrape_one(driver, symbol)
+            if not result:
+                return None
+            self.backup_manager.save_record(table_name, symbol, result)
+            records = result if isinstance(result, list) else [result]
+            self.db.insert_batch(table_name, records, batch_id=job_name)
+            return True
         except Exception as e:
-            logger.error(f"Database insert failed for {table_name}: {e}. Local backup retained at {backup_path}")
-        finally:
-            if isinstance(buffer, list):
-                buffer.clear()
+            logger.error(f"Failed to process symbol {symbol}: {e}")
+            raise e
 
     @abstractmethod
-    def scrape_all(self, driver: Optional[webdriver.Chrome], symbols: List[str]) -> List[Dict[str, Any]]: pass
+    def scrape_all(self, driver: Optional[webdriver.Chrome], symbols: List[str]) -> List[Dict[str, Any]]: 
+        pass
 
     @abstractmethod
-    def scrape_one(self, driver: Optional[webdriver.Chrome], symbol: str) -> Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]: pass
+    def scrape_one(self, driver: Optional[webdriver.Chrome], symbol: str) -> Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]: 
+        pass
