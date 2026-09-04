@@ -422,47 +422,45 @@ Decouple the "Local Persistence" (Backup) from the "Cloud Synchronization" (Uplo
 | **Cons** | **Latency**: Cloud data is only available after the entire job completes, not in real-time. **Disk Usage**: Temporary increase in local disk usage until the final purge. |
 
 ---
-
 ### ADR-015: Architecture Upgrade — Dynamic Configuration-Driven Identity and Decoupled Symbol Sourcing
 
 | Field | Value |
 |---|---|
 | **Status** | Completed |
-| **Date** | 2024-XX-XX |
+| **Date** | 2026-09-03 |
 
 #### 1. Background
-
 The original `BaseScraper` and `SymbolProvider` adopted a global single-configuration pattern. All scrapers shared the same `max_workers` setting and the same symbol source table (`ODS_COMPANY_MASTER`). This led to two critical issues:
-
 1. **Resource Runaway**: No ability to set different concurrency levels for API scrapers (lightweight) vs. Selenium scrapers (heavyweight), easily causing OCI micro VM memory overflow.
 2. **Data Coupling**: No ability to specify different symbol source tables for scrapers targeting different markets, limiting multi-market extensibility.
 
 #### 2. Decision
-
 Introduce the **"Identity-based Configuration"** pattern to completely decouple scraper runtime parameters from symbol sources.
 
 **2.1 Dynamic Configuration Loading Mechanism**
-- Introduce a `scraper_name` attribute in `BaseScraper`.
-- Implement hierarchical configuration read priority: `Scraper-specific config` $\rightarrow$ `Global system config` $\rightarrow$ `Code default values`.
-- Enforce that every scraper must define `symbol_source` in `config.yaml`; missing config throws `KeyError` at startup.
+- **Identity Definition**: Every scraper subclass must define a unique `scraper_name` attribute (e.g., `scraper_name = "price_ohlcv"`).
+- **Hierarchical Priority**: Implement a strict three-tier configuration resolution chain:
+  1. **Scraper-Specific**: `config.yaml` $\rightarrow$ `scrapers` $\rightarrow$ `{scraper_name}`
+  2. **System-Global**: `config.yaml` $\rightarrow$ `system` (Fallback for common parameters like `batch_size`)
+  3. **Code Default**: Hardcoded fallback values within the `BaseScraper` class.
+- **Mandatory Validation**: The `symbol_source` parameter is designated as a **Critical Config**. If it is missing from both the scraper-specific and system-global levels in `config.yaml`, the system must throw a `KeyError` at startup to prevent silent failures.
 
 **2.2 Decoupled SymbolProvider**
-- Refactor `SymbolProvider` from a static function approach to an instance-based model.
-- `BaseScraper` dynamically instantiates `SymbolProvider(source_table=...)` based on its own configuration.
-- Implement full parameterization of the `Fetch -> Local Backup -> DB Insert` pipeline.
+- **Instance-Based Model**: Refactor `SymbolProvider` from a static utility to a configurable class.
+- **Dynamic Instantiation**: `BaseScraper` instantiates its own `SymbolProvider` instance at runtime, passing the `symbol_source` table name retrieved from the configuration.
+- **Pipeline Parameterization**: Ensure the entire `Fetch $\rightarrow$ Local Backup $\rightarrow$ DB Insert` pipeline is driven by these dynamically loaded parameters.
 
 #### 3. Consequences
-
 | Description |
 |---|
-| **Pros**: **High Flexibility**: Each scraper can independently configure concurrency and symbol table; **Strong Robustness**: Mandatory validation at startup prevents runtime crashes from missing config; **Scalability**: Adding new market scrapers requires no core code changes, only YAML updates. |
-| **Cons**: Every new scraper subclass must define the `scraper_name` attribute. |
+| **Pros**: **High Flexibility**: Each scraper can independently tune concurrency and symbol sources; **Strong Robustness**: Mandatory startup validation eliminates "missing config" runtime crashes; **Scalability**: New market scrapers can be added via YAML updates without modifying core orchestration code. |
+| **Cons**: Every new scraper subclass must explicitly define the `scraper_name` attribute to enable configuration mapping. |
 
 #### 4. Implementation Details
-- **`src/base_scraper.py`**: Refactor `__init__` and `_run_iterative` to implement dynamic config loading and `SymbolProvider` instantiation.
-- **`src/symbol_provider.py`**: Upgrade `SymbolProvider` to a configurable class, remove global static generator.
-- **`src/scrapers/yahoo_scraper.py`**: Define `scraper_name = "price_ohlcv"` and simplify initialization logic.
-- **`test/`**: Update `test_base_scraper.py` and `test_symbol_provider.py` to validate priority logic and mandatory enforcement.
+- **`src/base_scraper.py`**: Refactor `__init__` and `_run_iterative` to implement the hierarchical config lookup and dynamic `SymbolProvider` instantiation.
+- **`src/symbol_provider.py`**: Upgrade `SymbolProvider` to a class that accepts `source_table` as an argument; remove global static generators.
+- **`src/scrapers/`**: Update all scrapers (e.g., `price_ohlcv`, `afr`) to define their respective `scraper_name`.
+- **`test/`**: Implement validation tests to ensure the priority chain (`Specific` $\rightarrow$ `System` $\rightarrow$ `Default`) is strictly honored.
 
 ---
 

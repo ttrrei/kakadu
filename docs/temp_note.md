@@ -1,42 +1,64 @@
-# Kakadu Development Progress Note - Yahoo Scraper
+Apply
+# Kakadu System State Snapshot & Integration Roadmap
 
-## 📅 Current Status: 2026-08-29
-**Overall Status**: Core Pipeline Verified ✅ (End-to-End Integration Passed)
-
-### 1. Achievements (What works)
-- **Full Chain Integration**: `ODS_COMPANY_MASTER` $\rightarrow$ `SymbolProvider` $\rightarrow$ `YahooScraper` $\rightarrow$ `DbOperator` $\rightarrow$ `OCI Object Storage`.
-- **Dynamic Routing**: Successfully implemented session-based routing (`pre_close` $\rightarrow$ `ODS_PRICE_OHLCV_PRE`).
-- **Memory Safety**: Confirmed stable operation under 1GB RAM constraints (No Pandas, O(1) memory usage).
-- **Zero-Loss Pipeline**: Verified the sequence: `Local Backup` $\rightarrow$ `DB Insert` $\rightarrow$ `Cloud Sync` $\rightarrow$ `Purge`.
-- **Data Normalization**: Resolved Oracle `NULL` vs `''` issue and implemented dynamic `.AX` suffix completion.
-
-### 2. Current Pain Point: Execution Speed 🐢
-- **Observation**: Integration test for ~1,800 symbols took ~15.5 minutes.
-- **Bottleneck**: 
-    - **Synchronous I/O**: Each symbol is requested and processed sequentially.
-    - **Blocking Sync**: The system waits for OCI Cloud upload to finish before processing the next batch.
-- **Business Impact**: "Pre-close" data must be fetched rapidly to provide actionable intelligence before the market closes. Current speed may be too slow for real-time decision support.
-
-### 3. Optimization Options (The Roadmap)
-
-| Option | Method | Expected Speedup | Memory Risk | Complexity |
-| :--- | :--- | :---: | :---: | :---: |
-| **A. AsyncIO** | Replace `requests` with `httpx` + `asyncio` | 5x - 10x | Low | Medium |
-| **B. Multi-Threading** | Use `ThreadPoolExecutor` for `scrape_one` | 3x - 5x | Medium | Low |
-| **C. Background Sync** | Move OCI upload to a background queue | 2x - 3x | Low | Medium |
-
-### 4. Strategic Pivot: `yahooquery` Consideration
-- **Context**: Earlier evaluated `yahooquery` as a potential alternative to raw `requests`.
-- **Pros**: 
-    - Better internal handling of Yahoo's API.
-    - Potential for faster multi-ticker fetching.
-    - Lower maintenance burden (community-maintained).
-- **Cons**: Potential memory overhead if Pandas is not strictly disabled.
-- **Decision**: Keep as a **High-Priority Alternative**. If AsyncIO implementation proves too complex or unstable, pivot to `yahooquery` (with strict "No-Pandas" rule) to achieve the required speed for pre-close decision making.
+## 📌 System Context (The "North Star")
+- **Philosophy**: "Thin-Edge, Thick-Core" (Python is a stateless collector; Oracle PL/SQL handles all logic).
+- **Constraint**: Strict 1GB RAM limit (OCI Micro VM).
+- **Core Principle**: Zero-Loss Data Pipeline (`Fetch` $\rightarrow$ `Local Backup` $\rightarrow$ `DB Insert` $\rightarrow$ `Cloud Sync` $\rightarrow$ `Purge`).
 
 ---
-**Next Action**: 
-1. Implement `main.py` to enable scheduled execution.
-2. Evaluate if current speed is acceptable in OCI VM environment.
-3. If not, implement Option A (AsyncIO) or pivot to `yahooquery`.
-4. Clean up code with temp print.
+
+## ✅ Verified Infrastructure (The Foundation)
+The following components have passed integration testing and are considered "Certified":
+
+1. **Configuration (`src/config.py`)**: 
+   - Implements Dual-File loading (`.env` + `config.yaml`).
+   - **ADR-015**: Hierarchical priority implemented: `Scraper-specific` $\rightarrow$ `System-global` $\rightarrow$ `Code default`.
+2. **Database Operator (`src/db_operator.py`)**:
+   - **Thin Mode**: `python-oracledb` in Thin Mode (No Instant Client).
+   - **Robustness**: Implements "Batch-to-Single" fallback. If a batch insert fails (e.g., ORA-12899 value too large), it automatically retries records individually to ensure maximum data yield.
+   - **Audit Injection**: Automatically injects `BATCH_ID` (UUID) and `LOAD_TIME` (ISO-8601) into all ODS writes.
+3. **Symbol Provider (`src/symbol_provider.py`)**:
+   - Implements O(1) memory usage via generators fetching from `ODS_COMPANY_MASTER`.
+4. **Backup & Upload (`src/backup_manager.py` & `src/upload_manager.py`)**:
+   - **ADR-014**: Decoupled Local Persistence from Cloud Sync.
+   - Pattern: `Local Write` (during scrape) $\rightarrow$ `Compress & Sync` (end of job) $\rightarrow$ `Purge`.
+
+---
+
+## 🛠 Current Architecture State
+- **ODS Schema**: Aligned with `install_ods_tables.sql`. All business columns are `VARCHAR2` to prevent type-conversion crashes.
+- **Price Routing**: `price_ohlcv` scraper uses a `sessions` matrix in `config.yaml` to route data to `ODS_PRICE_OHLCV_PRE` or `ODS_PRICE_OHLCV_POST` based on the execution window.
+- **Scraper Status**: Most scrapers have pivoted from Selenium to API-based ingestion to save RAM (except `annc`).
+
+---
+
+## 🚩 Remaining Critical Path (The "To-Do")
+
+### Phase 1: Component Audit (Final Polish)
+- [ ] **BaseScraper Integration**: Verify the "Glue" logic: `main.py` $\rightarrow$ `session_type` $\rightarrow$ `target_table` $\rightarrow$ `DbOperator`.
+- [ ] **Scraper-by-Scraper Audit**: 
+    - Ensure all scrapers use `CODE` instead of `SYMBOL`.
+    - Remove all hardcoded URLs/Keys.
+    - Verify `needs_driver` flag alignment in `config.yaml`.
+
+### Phase 2: Main Orchestration (`main.py`)
+- [ ] **CLI Dispatcher**: Implement `--task` and `--session-type` arguments.
+- [ ] **Startup Health Check**: Validate Wallet path, DB connectivity, and `SymbolProvider` health.
+- [ ] **Process Shielding**: Integrate `cleanup_vm.sh` in a `finally` block for browser tasks.
+- [ ] **Two-Tier Alerting**: Implement Tier 1 (Log) and Tier 2 (Pushover) notifications.
+
+### Phase 3: Performance Optimization (The Speed Gap)
+- **Problem**: Current sequential processing of ~1,800 symbols is too slow for "Pre-close" decision support.
+- **Evaluation Needed**:
+    - **Option A**: `AsyncIO` (`httpx`) for concurrent API requests.
+    - **Option B**: `ThreadPoolExecutor` for `scrape_one`.
+    - **Option C**: Pivot to `yahooquery` (with strict "No-Pandas" rule).
+
+---
+
+## 📝 Quick Reference for New Session
+- **Target Table for Price**: `ODS_PRICE_OHLCV_PRE` / `ODS_PRICE_OHLCV_POST`.
+- **Config Node for Global**: `system`.
+- **Config Node for Scrapers**: `scrapers`.
+- **Critical Constraint**: Never load full symbol lists or large dataframes into memory.
