@@ -1,43 +1,104 @@
-# ============================================
-# Kakadu - Non-Sensitive Configuration
-# ============================================
+# ==============================================================================
+# Kakadu - System Configuration
+# Aligned with ADR-005, 006, 008, 009, 011, 012, 016
+# ==============================================================================
 
-# --- ODS Tables ---
-tables:
-  ohlcv: ODS_PRICE_OHLCV
-  tick: ODS_PRICE_TICK
-  quote_eav: ODS_PRICE_QUOTE_EAV
-  short_position: ODS_SHORT_POSITION
-  market_annc: ODS_MARKET_ANNC
-  company_master: ODS_COMPANY_MASTER
-  analyst_consensus: ODS_ANALYST_CONSENSUS
+# --- Global System Settings ---
+system:
+  log_level: "INFO"
+  backup_dir: "/home/ubuntu/backup/"
+  max_workers: 20
+  # Physical VM reboot is handled via crontab
 
-# --- Data Sources ---
-sources:
-  yahoo:
-    base_url: https://query1.finance.yahoo.com
-    history_days: 60
-    interval: 1h
-  afr:
-    base_url: https://api.afr.com
-  asx:
-    base_url: https://www.asx.com.au
-  shortman:
-    base_url: https://api.shortman.com.au
+oci:
+  enabled: true # 控制是否执行 sync_to_cloud
 
-# --- Backup ---
-backup:
-  local_path: /home/ubuntu/backup
-  oci_enabled: true
+# --- Database Operator Settings (ADR-005) ---
+database:
+  # Pure-INSERT batch size (5-10 records) to maintain flat RAM footprint
+  insert_batch_size: 10 
+  connection_timeout: 30
 
-# --- Ingestion ---
-ingestion:
-  batch_size: 10
-  retry_attempts: 3
-  retry_delay_seconds: 5
+# ==============================================================================
+# Scraper-Specific Configurations (TOP-LEVEL)
+# ==============================================================================
+# Note: Each scraper must be a top-level node to be compatible with BaseScraper.
+# The 'symbol_source' should point to a DB Table or View.
 
-# --- Logging ---
-logging:
-  level: INFO
-  file_path: /home/ubuntu/logs/kakadu.log
-  rotation: daily
+# Extractor #5: Ticker Universe (API CSV)
+company_master:
+  url: "https://asx.api.markitdigital.com/asx-research/1.0/companies/directory/file"
+  target_table: "ODS_COMPANY_MASTER"
+  is_bulk: true
+  needs_driver: false
+
+# Extractor #1a: OHLCV Pre-Close
+price_ohlcv_pre:
+  base_url: "https://query2.finance.yahoo.com/v8/finance/chart/"
+  symbol_source: "EQUITY.VW_TOP_100_COMPANIES" # DB View
+  target_table: "ODS_PRICE_OHLCV_PRE"
+  is_bulk: false
+  needs_driver: false
+  batch_size: 50
+  max_workers: 20
+  interval: "1h"
+  range: "1d"
+
+# Extractor #1b: OHLCV Post-Close
+price_ohlcv_post:
+  base_url: "https://query2.finance.yahoo.com/v8/finance/chart/"
+  symbol_source: "EQUITY.VW_TOP_100_COMPANIES" # DB View
+  target_table: "ODS_PRICE_OHLCV_POST"
+  is_bulk: false
+  needs_driver: false
+  batch_size: 50
+  max_workers: 20
+  interval: "1h"
+  range: "3d"
+
+# Extractor #2: AFR Quote & Tick
+afr:
+  url: "" # To be filled during afr audit
+  target_tables: 
+    tick: "ODS_PRICE_TICK"
+    quote: "ODS_PRICE_QUOTE_EAV"
+  symbol_source: "EQUITY.VW_TARGET_SYMBOLS" # DB View
+  is_bulk: false
+  needs_driver: false
+  batch_size: 50
+
+# Extractor #3: Shortman
+short:
+  url: "" # To be filled during short audit
+  target_table: "ODS_SHORT_POSITION"
+  symbol_source: "EQUITY.VW_TARGET_SYMBOLS" # DB View
+  is_bulk: false
+  needs_driver: false
+  batch_size: 50
+
+# Extractor #4: ASX Announcements (Selenium)
+annc:
+  url: "https://www.asx.com.au/markets/company/"
+  target_table: "ODS_MARKET_ANNC"
+  symbol_source: "EQUITY.VW_TARGET_SYMBOLS" # DB View
+  is_bulk: false
+  needs_driver: true
+  batch_size: 20 # Smaller batch to prevent Selenium OOM
+
+# Extractor #6: Analyst Consensus (Split per ADR-011)
+analyst_consensus:
+  url: "" # To be filled during analyst_consensus audit
+  target_tables:
+    trends: "ODS_ANALYST_TRENDS"
+    targets: "ODS_ANALYST_TARGETS"
+  symbol_source: "EQUITY.VW_TARGET_SYMBOLS" # DB View
+  is_bulk: false
+  needs_driver: false
+  batch_size: 50
+
+# --- Alerting Strategy (SAD Section 6) ---
+alerting:
+  # Tier 1: Warning Log (Internal)
+  # Tier 2: Pushover Notification (External)
+  notification_level: "tier_2" 
+  retry_limit: 3

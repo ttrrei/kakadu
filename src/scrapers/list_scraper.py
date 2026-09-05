@@ -21,21 +21,27 @@ class ListScraper(BaseScraper):
 
     def __init__(self, db_op: Optional[Any] = None):
         # 关键修复：如果 db_op 为 None，则使用导入的单例 db_operator
-        # 这样可以防止 self.db 在 BaseScraper 中被赋值为 None
         actual_db = db_op if db_op is not None else db_operator
         super().__init__(actual_db)
         
-        # ADR-008: Bulk Mode for high-density data
-        self.is_bulk_task = True 
-        self.needs_driver = False  # API based, no Selenium needed
-        self.target_table = "ODS_COMPANY_MASTER"
+        # --- ADR-006 & ADR-008: Configuration driven from config.yaml ---
+        # We retrieve settings from the 'scrapers.company_master' block
+        scraper_cfg = self.config.get('scrapers', {}).get('company_master', {})
+        
+        self.is_bulk_task = scraper_cfg.get('is_bulk', True)
+        self.needs_driver = scraper_cfg.get('needs_driver', False)
+        self.target_table = scraper_cfg.get('target_table', "ODS_COMPANY_MASTER")
 
     def scrape_all(self, driver: Optional[WebDriver], symbols: List[str]) -> List[Dict[str, Any]]:
         """
         Fetches the ASX company directory CSV and parses it into a list of dicts.
         """
-        # API Endpoint for CSV export
-        target_url = "https://asx.api.markitdigital.com/asx-research/1.0/companies/directory/file"
+        # ADR-006: Retrieve URL from centralized config instead of hardcoding
+        target_url = self.config.get('scrapers', {}).get('company_master', {}).get('url')
+        
+        if not target_url:
+            logger.error("Configuration Error: 'url' for company_master not found in config.yaml")
+            return []
         
         try:
             logger.info(f"Fetching ASX Company Directory CSV from API: {target_url}")
@@ -85,4 +91,5 @@ class ListScraper(BaseScraper):
             return []
 
     def scrape_one(self, driver: Optional[WebDriver], symbol: str) -> Optional[Dict[str, Any]]:
+        # This scraper is strictly Bulk Mode per ADR-009
         raise NotImplementedError("ListScraper operates in Bulk Mode only.")

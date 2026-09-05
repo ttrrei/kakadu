@@ -16,84 +16,64 @@ logger = logging.getLogger(__name__)
 
 def test_backup_manager():
     """
-    Comprehensive test for BackupManager:
-    1. Local persistence
-    2. Directory structure
-    3. JSONL format validation
-    4. Empty data handling
+    Comprehensive test for New BackupManager:
+    1. Atomic local persistence (One file per symbol)
+    2. Directory structure (root/table/date/symbol.json)
+    3. Data integrity validation
+    4. Cleanup functionality
     """
-    # 使用一个专门的测试备份目录，避免污染生产备份
+    # 使用测试目录
     test_root = "/home/ubuntu/backup_test"
-    bm = BackupManager(backup_root=test_root)
+    bm = BackupManager(base_backup_dir=test_root)
     
     table_name = "TEST_TABLE"
-    test_data = [
-        {"CODE": "CBA", "PRICE": "100.5", "TIME": "2023-10-01 10:00"},
-        {"CODE": "BHP", "PRICE": "45.2", "TIME": "2023-10-01 10:00"},
-        {"CODE": "TLS", "PRICE": "38.1", "TIME": "2023-10-01 10:00"},
-    ]
+    test_symbols = {
+        "CBA": {"PRICE": "100.5", "TIME": "2023-10-01 10:00"},
+        "BHP": {"PRICE": "45.2", "TIME": "2023-10-01 10:00"},
+    }
 
     try:
         logger.info("--- Starting BackupManager Test ---")
 
-        # 1. 测试正常保存
-        logger.info("Test 1: Saving valid data...")
-        file_path = bm.save_local(table_name, test_data)
+        # 1. 测试正常保存 (Atomic Write)
+        logger.info("Test 1: Saving records per symbol...")
+        for symbol, data in test_symbols.items():
+            bm.save_record(table_name, symbol, data)
         
-        if not file_path or not os.path.exists(file_path):
-            logger.error("❌ FAILED: File was not created.")
+        # 验证目录结构
+        task_dir = bm.get_task_dir(table_name)
+        if not os.path.exists(task_dir):
+            logger.error("❌ FAILED: Task directory was not created.")
             return
 
-        logger.info(f"✅ SUCCESS: File created at {file_path}")
-
-        # 2. 验证目录结构 (Format: root/table/date/file.jsonl)
-        # 检查路径中是否包含 table_name
-        if table_name not in file_path:
-            logger.error("❌ FAILED: Directory structure does not contain table name.")
-            return
-        logger.info("✅ SUCCESS: Directory structure is correct.")
-
-        # 3. 验证 JSONL 格式 (每一行必须是合法的 JSON)
-        logger.info("Test 2: Validating JSONL content...")
-        with open(file_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-            if len(lines) != len(test_data):
-                logger.error(f"❌ FAILED: Line count mismatch. Expected {len(test_data)}, got {len(lines)}")
+        # 2. 验证文件存在与内容
+        logger.info("Test 2: Validating file content...")
+        for symbol, expected_data in test_symbols.items():
+            file_path = os.path.join(task_dir, f"{symbol}.json")
+            if not os.path.exists(file_path):
+                logger.error(f"❌ FAILED: File for {symbol} not found.")
                 return
             
-            for i, line in enumerate(lines):
-                try:
-                    record = json.loads(line)
-                    if record["CODE"] != test_data[i]["CODE"]:
-                        logger.error(f"❌ FAILED: Data mismatch at line {i}")
-                        return
-                except json.JSONDecodeError:
-                    logger.error(f"❌ FAILED: Line {i} is not a valid JSON.")
+            with open(file_path, 'r', encoding='utf-8') as f:
+                actual_data = json.load(f)
+                if actual_data != expected_data:
+                    logger.error(f"❌ FAILED: Data mismatch for {symbol}.")
                     return
-        logger.info("✅ SUCCESS: JSONL content is valid and matches input data.")
+        logger.info("✅ SUCCESS: All records saved correctly in JSON format.")
 
-        # 4. 测试空数据处理
-        logger.info("Test 3: Handling empty data...")
-        empty_path = bm.save_local(table_name, [])
-        if empty_path is None:
-            logger.info("✅ SUCCESS: Correctly returned None for empty data.")
+        # 3. 测试清理功能
+        logger.info("Test 3: Testing clear_task_dir...")
+        bm.clear_task_dir(table_name)
+        if not os.path.exists(task_dir):
+            logger.info("✅ SUCCESS: Local task directory purged successfully.")
         else:
-            logger.error("❌ FAILED: Should not create a file for empty data.")
-
-        # 5. 测试清理功能
-        logger.info("Test 4: Testing purge_local...")
-        bm.purge_local(file_path)
-        if not os.path.exists(file_path):
-            logger.info("✅ SUCCESS: Local file purged successfully.")
-        else:
-            logger.error("❌ FAILED: File still exists after purge.")
+            logger.error("❌ FAILED: Directory still exists after purge.")
 
         logger.info("--- ALL BACKUP MANAGER TESTS PASSED ---")
 
     except Exception as e:
         logger.error(f"❌ CRITICAL FAILURE during test: {e}")
     finally:
-        # 清理测试根目录
         if os.path.exists(test_root):
             shutil.rmtree(test_root)
             logger.info(f"Cleaned up test directory {test_root}")

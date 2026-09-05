@@ -51,7 +51,21 @@ Kakadu is a lightweight data acquisition and quantitative intelligence engine de
 | analyst_consensus | Analyst Trends & Targets | API / HTTP JSON (Yahoo) | Weekly (Sun 07:00 AEST) |
 | short | Shortman daily short interest | API / HTTP JSON | Daily Post-close |
 
+> **Note**: Iterative scrapers (afr, annc, analyst_consensus, short) source their target symbol list exclusively from the centralized SymbolProvider, which reads from ODS_COMPANY_MASTER via DbOperator. Bulk scrapers (price_ohlcv, company_master) do not rely on per-symbol iteration.
+
 **Browser Isolation Strategy**: Selenium/Chrome instances launch on-demand and execute strictly serially (at most one Chrome instance active on the VM at any time). Immediately after a task finishes (specifically for annc), cleanup_vm.sh executes SIGKILL on residual Chrome/Chromedriver processes to guarantee zero process or memory leakage.
+
+### C.1 Symbol Sourcing Mechanism (For Iterative Scrapers)
+
+To maintain a flat memory profile and ensure single-source-of-truth for ticker universes, all iterative scrapers obtain their symbol list from a centralized SymbolProvider interface. This provider:
+
+- **Retrieves** symbols as a generator/iterator from `ODS_COMPANY_MASTER` via `DbOperator`
+- **Applies** optional filtering (sector, market cap, inclusion/exclusion lists) based on `config.yaml`
+- **Validates** each symbol (non-empty, alphanumeric, allowed suffixes like `.AX`) before yielding
+- **Invoked** by `BaseScraper` in iterative mode (`is_bulk_task = False`)
+- **Enforces** O(1) memory usage during iteration by avoiding in-memory symbol lists
+
+This mechanism enforces the "Thin-Edge" principle by keeping the Python layer stateless and delegation-heavy, while ensuring symbolic consistency across all data domains.
 
 ### D. Oracle Storage & Analytics Layer (sql/)
 
@@ -90,21 +104,17 @@ Kakadu is a lightweight data acquisition and quantitative intelligence engine de
 ## 5. Data Backup & Consistency Verification
 
 - **Local Disk Persistence**: Raw extracted records (JSON Lines) are saved to /home/ubuntu/backup/<source>/<timestamp>.jsonl on the 30GB main partition.
-
 - **OCI Sync**: Upon task completion, the local backup directory is batch-uploaded to OCI Object Storage via OCI CLI or SDK.
-
 - **Consistency Verification**: Compares ingested ODS record counts against raw text line counts using a two-tier alerting strategy:
   - **Tier 1 (Warning Log)**: Single batch row-count mismatch → logged locally, backup retained, no Pushover notification.
   - **Tier 2 (Pushover Alert)**: Cumulative retry failures OR bulk missingness across multiple batches → triggers Pushover notification.
-
 - **Auto-Purge**: Once uploaded and verified, processed local files under /home/ubuntu/backup/ are automatically purged to prevent local disk exhaustion.
 
 ## 6. Logging & Alerting
 
 - **Logging**: Process-level logs are written to local files (daily rotation) and Stdout.
-
 - **Alerting**: Pushover notifications use a two-tier strategy aligned with BRD's "High-Tolerance Anti-False-Alarm" principle:
   - **Tier 1 (Warning Log)**: When a single batch's local JSONL backup row count does not match the database write row count → log to file, retain backup. No human notification.
   - **Tier 2 (Pushover Alert)**: When cumulative retry failures occur OR bulk data missingness is detected across the network/system → triggers Pushover to on-call.
 
-  **Rationale**: Prevents alert fatigue from transient single-batch hiccups while ensuring serious systemic issues escalate immediately.
+**Rationale**: Prevents alert fatigue from transient single-batch hiccups while ensuring serious systemic issues escalate immediately.

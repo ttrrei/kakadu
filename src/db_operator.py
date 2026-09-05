@@ -17,7 +17,7 @@ from typing import Any
 
 import oracledb
 
-# 导入新的配置加载类
+# 导入配置加载类
 from .config import EnvConfig
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ class DbOperator:
                     password=self.config.database.password,
                     dsn=self.config.database.tns_alias,
                     min=1,
-                    max=2,
+                    max=40,
                     increment=1,
                     wallet_location=self.config.database.wallet_path,
                     config_dir=self.config.database.wallet_path,
@@ -109,15 +109,12 @@ class DbOperator:
         records: list[dict[str, Any]],
         batch_id: str | None = None,
     ) -> str | None:
-        """Execute Pure-INSERT operations in small chunks (5-10 rows).
-
+        """Execute Pure-INSERT operations in small chunks.
+        
         Args:
-            table_name: Target ODS table (e.g. 'ODS_PRICE_OHLCV').
-            records: Raw list of dicts from scraper.
-            batch_id: Optional custom batch UUID. If omitted, one is generated.
-
-        Returns:
-            The effective BATCH_ID used for audit tracking, or None if records is empty.
+            table_name: Target ODS table.
+            records: Raw list of dicts.
+            batch_id: Optional custom batch UUID.
         """
         if not records:
             return None
@@ -132,44 +129,39 @@ class DbOperator:
 
         # Execute in small chunks
         batch_size = getattr(self.config, "BATCH_SIZE", 10)
-        for start in range(0, len(prepared_records), batch_size):
-            chunk = prepared_records[start : start + batch_size]
-            self._raw_execute(sql, chunk)
-
-        return effective_batch_id
-
-    def _raw_execute(self, sql: str, chunk: list[dict[str, Any]]) -> None:
-        """Execute a batch and fallback to individual rows on failure."""
+        
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            try:
-                cursor.executemany(sql, chunk)
-                # --- DEBUG PRINT: Verify actual rows inserted by Oracle ---
-                #print(f"!!! DB_OP: executemany success. Rows affected: {cursor.rowcount}")
-                conn.commit()
-            except oracledb.Error as exc:
-                conn.rollback()
-                logger.warning(
-                    f"Batch insert failed ({len(chunk)} rows): {exc}. Retrying individually..."
-                )
-                self._execute_individually(cursor, conn, sql, chunk)
+            for start in range(0, len(prepared_records), batch_size):
+                chunk = prepared_records[start : start + batch_size]
+                self._execute_chunk(cursor, conn, sql, chunk)
+            
+            # All chunks processed successfully, commit once
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            logger.error(f"Batch insert completely failed for {table_name}: {exc}")
         finally:
             cursor.close()
             self._pool.release(conn)
 
-    def _execute_individually(
-        self, cursor, conn, sql: str, chunk: list[dict[str, Any]]
-    ) -> None:
+        return effective_batch_id
+
+    def _execute_chunk(self, cursor, conn, sql: str, chunk: list[dict[str, Any]]) -> None:
+        """Execute a chunk and fallback to individual rows on failure."""
+        try:
+            cursor.executemany(sql, chunk)
+        except oracledb.Error as exc:
+            logger.warning(f"Chunk failed ({len(chunk)} rows): {exc}. Retrying individually...")
+            self._execute_individually(cursor, conn, sql, chunk)
+
+    def _execute_individually(self, cursor, conn, sql: str, chunk: list[dict[str, Any]]) -> None:
         """Best-effort fallback: commit good rows, log and drop bad ones."""
         for row in chunk:
             try:
                 cursor.execute(sql, row)
-                # --- DEBUG PRINT: Verify actual rows inserted by Oracle ---
-                #print(f"!!! DB_OP: individual execute success. Row affected: {cursor.rowcount}")
-                conn.commit()
             except oracledb.Error as exc:
-                conn.rollback()
                 logger.error(f"Dropped record due to DB error: {exc} | Row: {row}")
 
     def close(self) -> None:

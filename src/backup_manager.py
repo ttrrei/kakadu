@@ -3,84 +3,83 @@
 import os
 import json
 import logging
+import shutil
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 class BackupManager:
     """
-    Handles local JSONL persistence and OCI Object Storage synchronization.
-    Ensures zero data loss by saving raw extracted data before DB ingestion.
+    BackupManager handles the 'Thin-Edge' local persistence layer.
+    
+    Design Principles:
+    1. Single Responsibility: Only handles high-speed local disk writes.
+    2. Atomic Writes: Uses temp-file-and-rename pattern to prevent corrupted backups.
+    3. Shield Pattern: Failures in backup must not crash the main scraping pipeline.
+    4. O(1) Memory: Writes data immediately to disk without internal buffering.
     """
 
-    def __init__(self, backup_root: str = "/home/ubuntu/backup"):
-        self.backup_root = backup_root
-        self.logger = logging.getLogger(__name__)
-        self._ensure_root_exists()
+    def __init__(self, base_backup_dir: str = "/home/ubuntu/backup"):
+        # Path defined in SAD and BRD
+        self.base_backup_dir = base_backup_dir
+        self._ensure_base_dir()
 
-    def _ensure_root_exists(self):
+    def _ensure_base_dir(self):
+        """Ensure the root backup directory exists on the 30GB partition."""
         try:
-            if not os.path.exists(self.backup_root):
-                os.makedirs(self.backup_root, exist_ok=True)
+            if not os.path.exists(self.base_backup_dir):
+                os.makedirs(self.base_backup_dir, exist_ok=True)
+                logger.info(f"Initialized base backup directory: {self.base_backup_dir}")
         except Exception as e:
-            self.logger.error(f"Critical failure creating backup root {self.backup_root}: {e}")
+            logger.critical(f"Critical Failure: Cannot create backup directory {self.base_backup_dir}: {e}")
+            raise
 
-    def save_local(self, table_name: str, data: List[Dict[str, Any]]) -> Optional[str]:
+    def get_task_dir(self, table_name: str, date_str: Optional[str] = None) -> str:
         """
-        Saves data to a local .jsonl file.
-        Format: /home/ubuntu/backup/{table_name}/{YYYY-MM-DD}/{timestamp}.jsonl
+        Returns a structured directory for the current task.
+        Pattern: /home/ubuntu/backup/{table_name}/{YYYY-MM-DD}/
         """
-        if not data:
-            self.logger.info(f"No data to backup for {table_name}. Skipping.")
-            return None
-
-        try:
-            # 1. Setup directory structure
+        if date_str is None:
             date_str = datetime.now().strftime("%Y-%m-%d")
-            timestamp = datetime.now().strftime("%H%M%S_%f")
-            dir_path = os.path.join(self.backup_root, table_name, date_str)
-            os.makedirs(dir_path, exist_ok=True)
+        
+        task_dir = os.path.join(self.base_backup_dir, table_name, date_str)
+        os.makedirs(task_dir, exist_ok=True)
+        return task_dir
 
-            file_path = os.path.join(dir_path, f"{timestamp}.jsonl")
-
-            # 2. Stream write to disk (Memory efficient)
-            with open(file_path, 'w', encoding='utf-8') as f:
-                for record in data:
-                    # Ensure record is a dict and write as a single JSON line
-                    f.write(json.dumps(record, ensure_ascii=False) + '\n')
-
-            self.logger.info(f"Successfully backed up {len(data)} records to {file_path}")
-            return file_path
-
-        except Exception as e:
-            self.logger.error(f"Failed to save local backup for {table_name}: {e}")
-            return None
-
-    def sync_to_cloud(self, file_path: str) -> bool:
+    def save_record(self, table_name: str, symbol: str, data: Any):
         """
-        Uploads the local file to OCI Object Storage.
-        Note: This implementation assumes OCI CLI is configured on the VM.
+        Saves a symbol's data using an atomic write operation.
+        Prevents corrupted files if the process crashes during write.
         """
-        if not file_path or not os.path.exists(file_path):
-            return False
-
         try:
-            # Using OCI CLI for maximum lean-ness (avoids loading heavy SDK into RAM)
-            # Command: oci os object put -bn <bucket_name> --file <path> --name <name>
-            # This is a placeholder for the actual shell command
-            self.logger.info(f"Syncing {file_path} to OCI Object Storage...")
+            task_dir = self.get_task_dir(table_name)
+            final_path = os.path.join(task_dir, f"{symbol}.json")
+            temp_path = f"{final_path}.tmp"
             
-            # In real implementation, use subprocess.run(["oci", "os", "object", "put", ...])
-            # For now, we simulate success
-            return True
+            # 1. Write to temporary file
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            
+            # 2. Atomic rename (Standard Linux behavior)
+            os.replace(temp_path, final_path)
+                
+        except (OSError, IOError) as e:
+            logger.error(f"Disk I/O Error during backup for {symbol} in {table_name}: {e}")
         except Exception as e:
-            self.logger.error(f"Cloud sync failed for {file_path}: {e}")
-            return False
+            logger.error(f"Unexpected error saving backup for {symbol}: {e}")
 
-    def purge_local(self, file_path: str):
-        """Deletes local file after successful cloud sync to save disk space."""
+    def clear_task_dir(self, table_name: str, date_str: Optional[str] = None):
+        """
+        Purges the local backup directory. Called by UploadManager after successful OCI sync.
+        """
         try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                self.logger.info(f"Purged local backup: {file_path}")
+            if date_str is None:
+                date_str = datetime.now().strftime("%Y-%m-%d")
+                
+            task_dir = os.path.join(self.base_backup_dir, table_name, date_str)
+            if os.path.exists(task_dir):
+                shutil.rmtree(task_dir)
+                logger.info(f"Successfully purged local backup: {task_dir}")
         except Exception as e:
-            self.logger.warning(f"Failed to purge {file_path}: {e}")
+            logger.error(f"Failed to purge backup directory {table_name} for {date_str}: {e}")

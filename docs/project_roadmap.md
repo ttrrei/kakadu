@@ -29,19 +29,21 @@ Kakadu is an ultra-lightweight quantitative data collection and indicator calcul
 
 ### Phase 2: Iterative Scraper Development & Regression Test
 
-**Goal**: Develop each data source individually, with full end-to-end regression testing and 1GB RAM stress verification upon completion of each.
+**Goal**: Develop each data source individually, with full end-to-end regression testing and 1GB RAM stress verification upon completion of each — only after the centralized SymbolProvider mechanism is implemented and verified.
+
+- [ ] 2.0 Symbol Provider Foundation: Implement SymbolProvider interface (or logic in BaseScraper) to fetch symbols as a generator from ODS_COMPANY_MASTER via DbOperator, with config-driven filtering and validation. Verify memory-efficient iteration (O(1) memory) and integration with BaseScraper iterative mode before developing any iterative scrapers.
 
 - [ ] 2.1 Extractor #1: price_ohlcv (Yahoo/ASX API) Implement unified OHLCV data collection (Real-time/EOD/History) with pre-close and post-close independent scraping parameter handling (--session-type). Regression test: API fetch → JSONL backup → ODS_PRICE_OHLCV pure-INSERT write → OCI comparison.
 
-- [ ] 2.2 Extractor #2: afr (AFR Quote & Tick API) Implement AFR Quote & Tick multi-target table simultaneous writing: ODS_PRICE_TICK (tick-level granularity) and ODS_PRICE_QUOTE_EAV (bid-ask order book depth).
+- [ ] 2.2 Extractor #2: afr (AFR Quote & Tick API) Implement AFR Quote & Tick multi-target table simultaneous writing using the centralized SymbolProvider for symbol iteration (not hardcoded lists or per-scraper queries): ODS_PRICE_TICK (tick-level granularity) and ODS_PRICE_QUOTE_EAV (bid-ask order book depth).
 
-- [x] 2.3 Extractor #3: short (Shortman API) Implement full-market short position history data collection, writing to ODS_SHORT_POSITION.
+- [x] 2.3 Extractor #3: short (Shortman API) Implement full-market short position history data collection using the centralized SymbolProvider for symbol iteration, writing to ODS_SHORT_POSITION.
 
-- [ ] 2.4 Extractor #4: annc (ASX Market Announcements - Selenium) Implement headless browser scraping, integrate cleanup_vm.sh to forcefully terminate residual Chrome/Chromedriver processes to prevent RAM leaks.
+- [ ] 2.4 Extractor #4: annc (ASX Market Announcements - Selenium) Implement headless browser scraping using the centralized SymbolProvider for symbol iteration, integrate cleanup_vm.sh to forcefully terminate residual Chrome/Chromedriver processes to prevent RAM leaks.
 
 - [x] 2.5 Extractor #5: company_master (Ticker Universe - API CSV Export) Implement weekly full-market Master data collection, writing to ODS_COMPANY_MASTER.
 
-- [ ] 2.6 Extractor #6: analyst_consensus (Yahoo API) Implement weekly institutional ratings and targets collection via Yahoo API, writing to both ODS_ANALYST_TRENDS and ODS_ANALYST_TARGETS within a single job.
+- [ ] 2.6 Extractor #6: analyst_consensus (Yahoo API) Implement weekly institutional ratings and targets collection via Yahoo API using the centralized SymbolProvider for symbol iteration, writing to both ODS_ANALYST_TRENDS and ODS_ANALYST_TARGETS within a single job.
 
 ### Phase 3: Scheduling, Isolation & Anti-Crash
 
