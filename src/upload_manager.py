@@ -41,9 +41,8 @@ class UploadManager:
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 for root, dirs, files in os.walk(task_dir):
                     for file in files:
-                        if file.endswith('.json'):
+                        if not file.startswith('.'): 
                             full_path = os.path.join(root, file)
-                            # Store file relative to the task_dir to keep ZIP clean
                             arcname = os.path.relpath(full_path, task_dir)
                             zipf.write(full_path, arcname)
             

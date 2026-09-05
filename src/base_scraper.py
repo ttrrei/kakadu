@@ -1,6 +1,8 @@
 # src/base_scraper.py
 from __future__ import annotations
 import logging
+import os
+from datetime import datetime
 from abc import ABC, abstractmethod
 from typing import Any, List, Dict, Optional, Union, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,6 +18,11 @@ from .symbol_provider import SymbolProvider
 logger = logging.getLogger(__name__)
 
 class BaseScraper(ABC):
+    """
+    Abstract Base Class for all scrapers.
+    Implements the Template Method pattern to decouple orchestration from extraction.
+    """
+
     def __init__(self, db_op=db_operator):
         self.db = db_op
         self.config = config
@@ -32,7 +39,7 @@ class BaseScraper(ABC):
         self.is_bulk_task = getattr(self, 'is_bulk_task', scraper_cfg.get('is_bulk', False))
         self.needs_driver = getattr(self, 'needs_driver', scraper_cfg.get('needs_driver', True))
         
-        # 直接从配置中获取目标表，无需 session 映射
+        # Direct target table from config (per simplified routing design)
         self.target_table = scraper_cfg.get('target_table')
         self._driver: Optional[webdriver.Chrome] = None
 
@@ -44,7 +51,11 @@ class BaseScraper(ABC):
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=1920,1080")
         chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36")
-        return webdriver.Chrome(options=chrome_options)
+        try:
+            return webdriver.Chrome(options=chrome_options)
+        except Exception as e:
+            logger.error(f"Failed to initialize WebDriver: {e}")
+            raise
 
     def get_driver(self) -> Optional[webdriver.Chrome]:
         if not self.needs_driver: return None
@@ -52,6 +63,9 @@ class BaseScraper(ABC):
         return self._driver
 
     def run(self, job_name: str = ""):
+        """
+        Main execution entry point.
+        """
         try:
             if not self.target_table:
                 raise KeyError(f"Scraper {getattr(self, 'scraper_name', 'unknown')} is missing 'target_table' in config.yaml")
@@ -71,31 +85,48 @@ class BaseScraper(ABC):
                 self._driver = None
 
     def _get_symbol_generator(self) -> Iterable[str]:
+        """
+        Helper to create a SymbolProvider based on current scraper's config.
+        """
         scraper_name = getattr(self, 'scraper_name', None)
         scraper_cfg = self.config.get(scraper_name, {}) if scraper_name else {}
         symbol_source = scraper_cfg.get('symbol_source')
+        
         if not symbol_source:
-            raise KeyError(f"Configuration Error: 'symbol_source' missing for '{scraper_name}'")
-        return SymbolProvider(source_table=symbol_source).get_target_symbols()
+            raise KeyError(
+                f"Configuration Error: 'symbol_source' is missing for scraper '{scraper_name}'. "
+                f"Please add 'symbol_source: TABLE_NAME' to the {scraper_name} section in config.yaml."
+            )
+            
+        provider = SymbolProvider(source_table=symbol_source)
+        return provider.get_target_symbols()
 
     def _run_bulk(self, job_name: str):
+        logger.info("Executing in BULK mode...")
         driver = self.get_driver()
         data = self.scrape_all(driver, []) 
         if data:
             self.backup_manager.save_record(self.target_table, "BULK_EXPORT", data)
             self.db.insert_batch(self.target_table, data, batch_id=job_name)
+        else:
+            logger.warning("No data extracted in bulk mode.")
 
     def _run_iterative(self, job_name: str):
+        """
+        Optimized Iterative Mode with ThreadPoolExecutor and DB Buffering.
+        """
         logger.info(f"Executing in ITERATIVE mode with {self.max_workers} threads...")
-        success_count, fail_count = 0, 0
+        
+        success_count = 0
+        fail_count = 0
         driver = self.get_driver()
         
-        # 内存安全：直接迭代生成器
+        # Memory Safety: Iterate directly from generator
         symbols_gen = self._get_symbol_generator()
         buffer = []
         
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # 提交所有任务（由于是生成器，这里不会立即加载所有数据，但 submit 会创建 Future）
+            # Submit tasks to executor
             future_to_symbol = {
                 executor.submit(self._process_single_symbol, driver, symbol): symbol 
                 for symbol in symbols_gen
@@ -106,34 +137,45 @@ class BaseScraper(ABC):
                 try:
                     result = future.result()
                     if result:
+                        # Handle both single dict and list of dicts (One-to-Many)
                         records = result if isinstance(result, list) else [result]
                         buffer.extend(records)
                         success_count += 1
+                        
+                        # Flush to DB when buffer reaches batch_size
                         if len(buffer) >= self.batch_size:
                             self.db.insert_batch(self.target_table, buffer, batch_id=job_name)
-                            buffer.clear()
+                            buffer = [] # Create new list to avoid reference issues
                 except Exception as e:
                     logger.error(f"Failed to process symbol {symbol}: {e}")
                     fail_count += 1
 
+        # Final flush for remaining records
         if buffer:
             self.db.insert_batch(self.target_table, buffer, batch_id=job_name)
 
         logger.info(f"Iterative run finished. Success: {success_count}, Failed: {fail_count}")
 
     def _process_single_symbol(self, driver, symbol):
+        """
+        Extraction logic for a single symbol.
+        """
         try:
             result = self.scrape_one(driver, symbol)
             if result:
-                # 备份依然即时写入，确保零丢失
-                self.backup_manager.save_record(self.target_table, symbol, result) 
+                # Local backup is performed immediately to ensure zero data loss
+                self.backup_manager.save_record(self.target_table, symbol, result)
             return result
         except Exception as e:
             logger.error(f"Scrape error for {symbol}: {e}")
             raise e
 
     @abstractmethod
-    def scrape_all(self, driver: Optional[webdriver.Chrome], symbols: List[str]) -> List[Dict[str, Any]]: pass
+    def scrape_all(self, driver: Optional[webdriver.Chrome], symbols: List[str]) -> List[Dict[str, Any]]: 
+        """Implement for Bulk mode"""
+        pass
 
     @abstractmethod
-    def scrape_one(self, driver: Optional[webdriver.Chrome], symbol: str) -> Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]: pass
+    def scrape_one(self, driver: Optional[webdriver.Chrome], symbol: str) -> Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]: 
+        """Implement for Iterative mode"""
+        pass

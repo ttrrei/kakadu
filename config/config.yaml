@@ -1,6 +1,6 @@
 # ==============================================================================
 # Kakadu - System Configuration
-# Aligned with ADR-005, 006, 008, 009, 011, 012
+# Aligned with ADR-005, 006, 008, 009, 011, 012, 016
 # ==============================================================================
 
 # --- Global System Settings ---
@@ -19,87 +19,82 @@ database:
   insert_batch_size: 10 
   connection_timeout: 30
 
-# --- Scraper-Specific Configurations ---
-# This section allows each scraper to be configured independently
-scrapers:
-  # Extractor #5: Ticker Universe (API CSV)
-  company_master:
-    url: "https://asx.api.markitdigital.com/asx-research/1.0/companies/directory/file" # verified
-    target_table: "ODS_COMPANY_MASTER" # verified
-    is_bulk: true # verified
-    needs_driver: false # verified
+# ==============================================================================
+# Scraper-Specific Configurations (TOP-LEVEL)
+# ==============================================================================
+# Note: Each scraper must be a top-level node to be compatible with BaseScraper.
+# The 'symbol_source' should point to a DB Table or View.
 
-  # Extractor #1: OHLCV (Merged Yahoo/ASX)
- 
-  # Extractor #1a: OHLCV Pre-Close
-  price_ohlcv_pre:
-				  
-    base_url: "https://query2.finance.yahoo.com/v8/finance/chart/"
-    symbol_source: "EQUITY.VW_TOP_100_COMPANIES" # 对应数据库视图
-    target_table: "ODS_PRICE_OHLCV_PRE"         # 直接定义目标表
-    is_bulk: false
-    needs_driver: false
-    batch_size: 50
-    max_workers: 20
-    interval: "1h"
-    range: "1d"
+# Extractor #5: Ticker Universe (API CSV)
+company_master:
+  url: "https://asx.api.markitdigital.com/asx-research/1.0/companies/directory/file"
+  target_table: "ODS_COMPANY_MASTER"
+  is_bulk: true
+  needs_driver: false
 
-  # Extractor #1b: OHLCV Post-Close
-  price_ohlcv_post:
-    base_url: "https://query2.finance.yahoo.com/v8/finance/chart/"
-    symbol_source: "EQUITY.VW_TOP_100_COMPANIES" # 对应数据库视图
-				 
-    target_table: "ODS_PRICE_OHLCV_POST"        # 直接定义目标表
-    is_bulk: false
-    needs_driver: false
-    batch_size: 50
-    max_workers: 20
-    interval: "1h"
-    range: "3d"
+# Extractor #1a: OHLCV Pre-Close
+price_ohlcv_pre:
+  base_url: "https://query2.finance.yahoo.com/v8/finance/chart/"
+  symbol_source: "EQUITY.VW_TOP_100_COMPANIES" # DB View
+  target_table: "ODS_PRICE_OHLCV_PRE"
+  is_bulk: false
+  needs_driver: false
+  batch_size: 50
+  max_workers: 20
+  interval: "1h"
+  range: "1d"
 
-  # Extractor #2: AFR Quote & Tick
-  afr:
-    url: "" # To be filled during afr audit
-    target_tables: 
-      tick: "ODS_PRICE_TICK"
-      quote: "ODS_PRICE_QUOTE_EAV"
-    is_bulk: false
-    needs_driver: false
-    batch_size: 50
+# Extractor #1b: OHLCV Post-Close
+price_ohlcv_post:
+  base_url: "https://query2.finance.yahoo.com/v8/finance/chart/"
+  symbol_source: "EQUITY.VW_TOP_100_COMPANIES" # DB View
+  target_table: "ODS_PRICE_OHLCV_POST"
+  is_bulk: false
+  needs_driver: false
+  batch_size: 50
+  max_workers: 20
+  interval: "1h"
+  range: "3d"
 
-  # Extractor #3: Shortman
-  short:
-    url: "" # To be filled during short audit
-    target_table: "ODS_SHORT_POSITION"
-    is_bulk: false
-    needs_driver: false
-    batch_size: 50
+# Extractor #2: AFR Quote & Tick
+afr:
+  url: "" # To be filled during afr audit
+  target_tables: 
+    tick: "ODS_PRICE_TICK"
+    quote: "ODS_PRICE_QUOTE_EAV"
+  symbol_source: "EQUITY.VW_TARGET_SYMBOLS" # DB View
+  is_bulk: false
+  needs_driver: false
+  batch_size: 50
 
-  # Extractor #4: ASX Announcements (Selenium)
-  annc:
-    url: "https://www.asx.com.au/markets/company/"
-    target_table: "ODS_MARKET_ANNC"
-    is_bulk: false
-    needs_driver: true
-    batch_size: 20 # Smaller batch to prevent Selenium OOM
+# Extractor #3: Shortman
+short:
+  url: "" # To be filled during short audit
+  target_table: "ODS_SHORT_POSITION"
+  symbol_source: "EQUITY.VW_TARGET_SYMBOLS" # DB View
+  is_bulk: false
+  needs_driver: false
+  batch_size: 50
 
-  # Extractor #6: Analyst Consensus (Split per ADR-011)
-  analyst_consensus:
-    url: "" # To be filled during analyst_consensus audit
-    target_tables:
-      trends: "ODS_ANALYST_TRENDS"
-      targets: "ODS_ANALYST_TARGETS"
-    is_bulk: false
-    needs_driver: false
-    batch_size: 50
+# Extractor #4: ASX Announcements (Selenium)
+annc:
+  url: "https://www.asx.com.au/markets/company/"
+  target_table: "ODS_MARKET_ANNC"
+  symbol_source: "EQUITY.VW_TARGET_SYMBOLS" # DB View
+  is_bulk: false
+  needs_driver: true
+  batch_size: 20 # Smaller batch to prevent Selenium OOM
 
-# --- Centralized Symbol Provider Filtering (ADR-012) ---
-# Used by SymbolProvider to filter ODS_COMPANY_MASTER generator
-symbol_filter:
-  include_sectors: []      # e.g., ['Mining', 'Finance']
-  exclude_symbols: []     # e.g., ['TEST.AX']
-  require_suffix: ".AX"
-  min_market_cap: 0        # Minimum market cap to include in iteration
+# Extractor #6: Analyst Consensus (Split per ADR-011)
+analyst_consensus:
+  url: "" # To be filled during analyst_consensus audit
+  target_tables:
+    trends: "ODS_ANALYST_TRENDS"
+    targets: "ODS_ANALYST_TARGETS"
+  symbol_source: "EQUITY.VW_TARGET_SYMBOLS" # DB View
+  is_bulk: false
+  needs_driver: false
+  batch_size: 50
 
 # --- Alerting Strategy (SAD Section 6) ---
 alerting:
