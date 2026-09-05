@@ -464,6 +464,35 @@ Introduce the **"Identity-based Configuration"** pattern to completely decouple 
 
 ---
 
+### ADR-016: Symbol Filtering Logic Migration (Python $\rightarrow$ SQL View)
+
+| Field | Value |
+|---|---|
+| **Status** | Approved |
+| **Date** | 2026-09-05 |
+
+#### 1. Background
+Initially, the `SymbolProvider` handled symbol filtering (inclusion/exclusion lists, sector filtering) within the Python layer. This required loading configuration from `config.yaml` and performing iterative checks in Python, which introduced:
+- **Logic Duplication**: Filtering logic existed in Python but the data lived in the DB.
+- **Configuration Overhead**: Changes to the target symbol universe required updating YAML files and redeploying/restarting the VM.
+- **Violation of "Thin-Edge"**: Python was performing business-level data selection instead of acting as a stateless transport.
+
+#### 2. Decision
+Shift all symbol filtering and universe definition from the Python `SymbolProvider` to the Oracle Database layer using **Database Views**.
+
+**2.1 Implementation Strategy**
+- **Database-Side**: Create specialized Views (e.g., `VW_TARGET_SYMBOLS`, `VW_PRICE_OHLCV_TARGETS`) that encapsulate all `WHERE` clauses (Sector, Market Cap, Exclusion lists).
+- **Python-Side**: The `SymbolProvider` is stripped of all filtering logic. It now accepts a `source_table` parameter which can be either a raw table or a View. It simply executes `SELECT CODE FROM {source}`.
+- **Transport Adaptation**: The only logic remaining in `SymbolProvider` is basic string cleaning and suffix completion (e.g., adding `.AX`), as this is required for external API compatibility.
+
+#### 3. Consequences
+| Description |
+|---|
+| **Pros**: **Zero-Latency Filtering**: DB handles selection via optimized indexes. **Dynamic Updates**: The target universe can be changed by updating a View definition in SQL without touching the Python codebase. **Extreme Thin-Edge**: Python becomes a pure data pipe. |
+| **Cons**: Requires the creation and management of View objects within the Oracle schema. |
+
+---
+
 ## 4. Implementation Progress (Current State)
 
 ### Foundation Layer (Completed)

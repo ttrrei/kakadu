@@ -30,25 +30,32 @@ scrapers:
     needs_driver: false # verified
 
   # Extractor #1: OHLCV (Merged Yahoo/ASX)
-  price_ohlcv:
-    # 基础设置
-    base_url: "https://query2.finance.yahoo.com/v8/finance/chart/" # 基础域名
-    symbol_source: "EQUITY.VW_TOP_100_COMPANIES"
+ 
+  # Extractor #1a: OHLCV Pre-Close
+  price_ohlcv_pre:
+				  
+    base_url: "https://query2.finance.yahoo.com/v8/finance/chart/"
+    symbol_source: "EQUITY.VW_TOP_100_COMPANIES" # 对应数据库视图
+    target_table: "ODS_PRICE_OHLCV_PRE"         # 直接定义目标表
     is_bulk: false
     needs_driver: false
     batch_size: 50
     max_workers: 20
-    
-    # Session 矩阵
-    sessions:
-      pre_close:
-        target_table: "ODS_PRICE_OHLCV_PRE"
-        interval: "1h"
-        range: "1d"
-      post_close:
-        target_table: "ODS_PRICE_OHLCV_POST"
-        interval: "1h"
-        range: "3d"
+    interval: "1h"
+    range: "1d"
+
+  # Extractor #1b: OHLCV Post-Close
+  price_ohlcv_post:
+    base_url: "https://query2.finance.yahoo.com/v8/finance/chart/"
+    symbol_source: "EQUITY.VW_TOP_100_COMPANIES" # 对应数据库视图
+				 
+    target_table: "ODS_PRICE_OHLCV_POST"        # 直接定义目标表
+    is_bulk: false
+    needs_driver: false
+    batch_size: 50
+    max_workers: 20
+    interval: "1h"
+    range: "3d"
 
   # Extractor #2: AFR Quote & Tick
   afr:
