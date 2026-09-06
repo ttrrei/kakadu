@@ -111,4 +111,4 @@ Execute in three distinct phases. Do not proceed to the next phase until all ite
 - [x] `short`
 - [ ] `annc`
 - [x] `company_master`
-- [ ] `analyst_consensus`
+- [x] `analyst_consensus`

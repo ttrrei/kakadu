@@ -86,15 +86,23 @@ annc:
   batch_size: 20 # Smaller batch to prevent Selenium OOM
 
 # Extractor #6: Analyst Consensus (Split per ADR-011)
-analyst_consensus:
-  url: "" # To be filled during analyst_consensus audit
-  target_tables:
-    trends: "ODS_ANALYST_TRENDS"
-    targets: "ODS_ANALYST_TARGETS"
-  symbol_source: "EQUITY.VW_TARGET_SYMBOLS" # DB View
+# Extractor #6a: Analyst Trends
+analyst_trends:
+  symbol_source: "EQUITY.VW_TOP_100_COMPANIES"
+  target_table: "ODS_ANALYST_TRENDS"
   is_bulk: false
   needs_driver: false
   batch_size: 50
+  max_workers: 10
+
+# Extractor #6b: Analyst Targets
+analyst_targets:
+  symbol_source: "EQUITY.VW_TOP_100_COMPANIES"
+  target_table: "ODS_ANALYST_TARGETS"
+  is_bulk: false
+  needs_driver: false
+  batch_size: 50
+  max_workers: 10
 
 # --- Alerting Strategy (SAD Section 6) ---
 alerting:

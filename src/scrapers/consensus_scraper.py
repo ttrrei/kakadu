@@ -1,119 +1,57 @@
+# src/scrapers/consensus_scraper.py
+from __future__ import annotations
 import logging
-from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 import yfinance as yf
-import pandas as pd
 
-from src.base_scraper import BaseScraper
+from ..base_scraper import BaseScraper
 
 logger = logging.getLogger(__name__)
 
-class ConsensusScraper(BaseScraper):
+class ConsensusBase(BaseScraper):
     """
-    Scraper for Analyst Consensus data using Yahoo Finance API.
-    
-    Implements 'Logical Isolation' where Trends and Targets are treated as 
-    independent tasks within a single job to prevent fragile fields from 
-    blocking stable ones.
+    Internal base class for Analyst Consensus logic.
+    Implements common settings for all consensus-related scrapers.
     """
+    # Define as class attributes to avoid overriding BaseScraper.__init__
+    # This ensures self.db is correctly initialized to the db_operator singleton
+    is_bulk_task = False
+    needs_driver = False
 
-    # Map field names to their specific handler methods and target ODS tables
-    FIELD_CONFIG = {
-        "recommendations": {
-            "handler": "_handle_recommendations",
-            "table": "ODS_ANALYST_TRENDS"
-        },
-        "analyst_price_targets": {
-            "handler": "_handle_targets",
-            "table": "ODS_ANALYST_TARGETS"
-        }
-    }
+    def scrape_all(self, driver: Optional[Any], symbols: List[str]) -> List[Dict[str, Any]]:
+        """Consensus scrapers are strictly iterative."""
+        raise NotImplementedError("Consensus scrapers operate in Iterative Mode only.")
 
-    def __init__(self, db_operator, config):
-        # BaseScraper.__init__ typically assigns the db_operator to self.db
-        super().__init__(db_operator) 
-        self.config = config
-        self.is_bulk_task = False  # Iterative mode: fetch per symbol
+# ==============================================================================
+# Concrete Implementations
+# ==============================================================================
 
-    # =========================================================================
-    # BaseScraper Contract Implementations
-    # =========================================================================
-    def scrape_all(self, symbols: List[str]):
-        """Implementation of BaseScraper abstract method."""
-        self.run(symbols)
+class ConsensusTrendsScraper(ConsensusBase):
+    """
+    Identity: Analyst Recommendation Trends.
+    Maps to 'analyst_trends' in config.yaml.
+    Target Table: ODS_ANALYST_TRENDS
+    """
+    scraper_name = "analyst_trends"
 
-    def scrape_one(self, symbol: str):
-        """Implementation of BaseScraper abstract method."""
-        self.run([symbol])
-
-    # =========================================================================
-    # Core Logic
-    # =========================================================================
-    def run(self, symbols: List[str], requested_fields: Optional[List[str]] = None):
+    def scrape_one(self, driver: Optional[Any], symbol: str) -> Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]:
         """
-        Main orchestration logic.
-        :param symbols: List of tickers to fetch.
-        :param requested_fields: Optional list to filter which fields to scrape.
-        """
-        # Temporal Alignment: Single timestamp for the entire job run
-        job_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        
-        # Determine which fields to execute
-        fields_to_run = requested_fields if requested_fields else list(self.FIELD_CONFIG.keys())
-        
-        logger.info(f"Starting Consensus job. Fields: {fields_to_run}. Symbols: {len(symbols)}")
-
-        for symbol in symbols:
-            try:
-                # Initialize Ticker object once per symbol to minimize network overhead
-                ticker = yf.Ticker(symbol)
-                
-                # Logical Isolation: Iterate through requested fields independently
-                for field_name in fields_to_run:
-                    if field_name not in self.FIELD_CONFIG:
-                        logger.warning(f"Unknown field requested: {field_name}. Skipping.")
-                        continue
-                    
-                    config_item = self.FIELD_CONFIG[field_name]
-                    handler_name = config_item["handler"]
-                    table_name = config_item["table"]
-                    handler = getattr(self, handler_name)
-                    
-                    try:
-                        # Execute field-specific extraction
-                        records = handler(ticker, symbol, job_timestamp)
-                        
-                        if records:
-                            # Pure-INSERT into the specific ODS table using self.db from BaseScraper
-                            self.db.insert_batch(table_name, records)
-                            logger.info(f"Successfully ingested {len(records)} records for {symbol} -> {table_name}")
-                        else:
-                            logger.info(f"No data found for {symbol} field {field_name}")
-                            
-                    except Exception as e:
-                        # Field-level failure: Log and continue to next field
-                        logger.error(f"Field-level failure [{field_name}] for {symbol}: {str(e)}")
-                        
-            except Exception as e:
-                # Ticker-level failure: Log and continue to next symbol
-                logger.error(f"Ticker-level failure for {symbol}: {str(e)}")
-
-    def _handle_recommendations(self, ticker: yf.Ticker, symbol: str, timestamp: str) -> List[Dict[str, Any]]:
-        """
-        Handles 'recommendations' (recommendationTrend).
-        Input: pandas.DataFrame
-        Output: List of records for ODS_ANALYST_TRENDS
+        Fetches recommendation trends for a single symbol.
+        Returns a list of records (One-to-Many).
         """
         try:
+            ticker = yf.Ticker(symbol)
             df = ticker.recommendations
+            
             if df is None or df.empty:
-                return []
+                logger.info(f"No recommendation trends found for {symbol}")
+                return None
 
             records = []
-            # The index is usually the date
+            # The index of ticker.recommendations is usually the date
             for date, row in df.iterrows():
                 records.append({
-                    "CODE": symbol,
+                    "CODE": symbol.upper(),
                     "MONTH_DATE": str(date),
                     "STRONG_BUY": str(row.get("strongBuy", "")),
                     "BUY": str(row.get("buy", "")),
@@ -121,37 +59,50 @@ class ConsensusScraper(BaseScraper):
                     "SELL": str(row.get("sell", "")),
                     "STRONG_SELL": str(row.get("strongSell", "")),
                 })
+            
+            if records:
+                logger.info(f"Extracted {len(records)} trend records for {symbol}")
             return records
-        except Exception as e:
-            # Re-raise to be caught by the field-level try-except in run()
-            raise RuntimeError(f"Error processing recommendations: {e}")
 
-    def _handle_targets(self, ticker: yf.Ticker, symbol: str, timestamp: str) -> List[Dict[str, Any]]:
+        except Exception as e:
+            logger.error(f"Error processing trends for {symbol}: {e}")
+            return None
+
+class ConsensusTargetsScraper(ConsensusBase):
+    """
+    Identity: Analyst Price Targets.
+    Maps to 'analyst_targets' in config.yaml.
+    Target Table: ODS_ANALYST_TARGETS
+    """
+    scraper_name = "analyst_targets"
+
+    def scrape_one(self, driver: Optional[Any], symbol: str) -> Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]:
         """
-        Handles Analyst Price Targets.
-        Updated to use the latest yfinance key naming convention found via diagnostics.
+        Fetches analyst price targets for a single symbol.
+        Returns a single record snapshot.
         """
         try:
+            ticker = yf.Ticker(symbol)
             info = ticker.info
             
-            # Yahoo Finance now provides these as top-level keys in the info dict
             target_low = info.get("targetLowPrice")
             target_high = info.get("targetHighPrice")
             target_mean = info.get("targetMeanPrice")
             target_median = info.get("targetMedianPrice")
 
-            # If all are missing, then there is truly no data for this ticker
-            if target_low is None and target_high is None and target_mean is None and target_median is None:
-                return []
+            if all(v is None for v in [target_low, target_high, target_mean, target_median]):
+                logger.info(f"No price targets found for {symbol}")
+                return None
 
-            # Return as a list containing a single record (snapshot)
-            return [{
-                "CODE": symbol,
-                "TARGET_LOW": str(target_low) if target_low is not None else "",
-                "TARGET_HIGH": str(target_high) if target_high is not None else "",
-                "TARGET_MEAN": str(target_mean) if target_mean is not None else "",
-                "TARGET_MEDIAN": str(target_median) if target_median is not None else "",
-            }]
+            # Return as a single record snapshot
+            return {
+                "CODE": symbol.upper(),
+                "TARGET_LOW": str(target_low) if target_low is not None else None,
+                "TARGET_HIGH": str(target_high) if target_high is not None else None,
+                "TARGET_MEAN": str(target_mean) if target_mean is not None else None,
+                "TARGET_MEDIAN": str(target_median) if target_median is not None else None,
+            }
+
         except Exception as e:
-            # Re-raise to be caught by the field-level try-except in run()
-            raise RuntimeError(f"Error processing price targets: {e}")
+            logger.error(f"Error processing targets for {symbol}: {e}")
+            return None
