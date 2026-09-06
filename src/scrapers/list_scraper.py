@@ -8,8 +8,6 @@ from typing import Any, List, Dict, Optional
 from selenium.webdriver.chrome.webdriver import WebDriver
 
 from ..base_scraper import BaseScraper
-# 导入 DbOperator 的单例实例，用于作为默认连接
-from ..db_operator import db as db_operator
 
 logger = logging.getLogger(__name__)
 
@@ -17,38 +15,37 @@ class ListScraper(BaseScraper):
     """
     Scraper for the ASX Ticker List via API CSV export.
     Implements Bulk Mode: Fetches the entire market list via HTTP request.
+    
+    Adheres to ADR-009 (API CSV Pivot) and ADR-015 (Identity-based Config).
     """
 
-    def __init__(self, db_op: Optional[Any] = None):
-        # 关键修复：如果 db_op 为 None，则使用导入的单例 db_operator
-        actual_db = db_op if db_op is not None else db_operator
-        super().__init__(actual_db)
-        
-        # --- ADR-006 & ADR-008: Configuration driven from config.yaml ---
-        # We retrieve settings from the 'scrapers.company_master' block
-        scraper_cfg = self.config.get('scrapers', {}).get('company_master', {})
-        
-        self.is_bulk_task = scraper_cfg.get('is_bulk', True)
-        self.needs_driver = scraper_cfg.get('needs_driver', False)
-        self.target_table = scraper_cfg.get('target_table', "ODS_COMPANY_MASTER")
+    # Identity for configuration mapping in config.yaml
+    scraper_name = "company_master"
+    
+    # Default task attributes (can be overridden by config.yaml)
+    is_bulk_task = True
+    needs_driver = False
 
     def scrape_all(self, driver: Optional[WebDriver], symbols: List[str]) -> List[Dict[str, Any]]:
         """
         Fetches the ASX company directory CSV and parses it into a list of dicts.
         """
-        # ADR-006: Retrieve URL from centralized config instead of hardcoding
-        target_url = self.config.get('scrapers', {}).get('company_master', {}).get('url')
+        # ADR-015: Retrieve URL from the top-level scraper node in config.yaml
+        cfg = self.config.get(self.scraper_name, {})
+        target_url = cfg.get('url')
         
         if not target_url:
-            logger.error("Configuration Error: 'url' for company_master not found in config.yaml")
+            logger.error(f"Configuration Error: 'url' for {self.scraper_name} not found in config.yaml")
             return []
         
         try:
             logger.info(f"Fetching ASX Company Directory CSV from API: {target_url}")
+            
             # Use a browser-like User-Agent to avoid being blocked by API
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
+            
             response = requests.get(target_url, headers=headers, timeout=30)
             response.raise_for_status()
             
@@ -61,7 +58,7 @@ class ListScraper(BaseScraper):
             
             extracted_data = []
             for row in reader:
-                # Exact mapping based on the provided CSV file:
+                # Mapping based on ASX CSV structure:
                 # "ASX code" -> CODE
                 # "Company name" -> COMPANY_NAME
                 # "GICs industry group" -> SECTOR
@@ -91,5 +88,7 @@ class ListScraper(BaseScraper):
             return []
 
     def scrape_one(self, driver: Optional[WebDriver], symbol: str) -> Optional[Dict[str, Any]]:
-        # This scraper is strictly Bulk Mode per ADR-009
+        """
+        This scraper is strictly Bulk Mode per ADR-009.
+        """
         raise NotImplementedError("ListScraper operates in Bulk Mode only.")

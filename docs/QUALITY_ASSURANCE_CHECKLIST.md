@@ -97,11 +97,18 @@ Execute in three distinct phases. Do not proceed to the next phase until all ite
 
 ## Audit Status
 
-- [ ] `base_scraper.py`
-- [ ] `db_operator.py`
-- [ ] `price_ohlcv`
+### Core Foundation (Certified)
+- [x] `base_scraper.py`
+- [x] `db_operator.py`
+- [x] `config.py`
+- [x] `symbol_provider.py`
+- [x] `backup_manager.py`
+- [x] `upload_manager.py`
+
+### Scraper Implementations
+- [x] `price_ohlcv` (YahooPre/Post)
 - [ ] `afr`
-- [ ] `short`
+- [x] `short`
 - [ ] `annc`
-- [ ] `company_master`
+- [x] `company_master`
 - [ ] `analyst_consensus`

@@ -9,53 +9,27 @@ from ..db_operator import db as db_operator
 
 logger = logging.getLogger(__name__)
 
-class YahooScraper(BaseScraper):
+class YahooBase(BaseScraper):
     """
-    Scraper for Yahoo Finance OHLCV data.
-    Implements Iterative Mode: Fetches data per symbol and buffers it for batch insertion.
-    
-    Design:
-    - Dynamic Table Routing: Routes data to ODS_PRICE_OHLCV_PRE or ODS_PRICE_OHLCV_POST based on session.
-    - Memory-Efficient: Uses requests and returns List[Dict], maintaining O(1) memory footprint.
-    - Zero-Loss: Integrated with BaseScraper's Fetch -> Backup -> Insert pipeline.
+    Internal base class for Yahoo Finance OHLCV logic.
+    Implements the core extraction and filtering logic.
+    Not intended to be instantiated directly.
     """
-
-    def __init__(self, db_op: Optional[Any] = None, session_type: str = "post_close"):
-        # Use the provided db_op or fall back to the singleton
+    def __init__(self, db_op=None):
+        # Ensure we use the singleton db_operator if none provided
         actual_db = db_op if db_op is not None else db_operator
-        super().__init__(actual_db)
+        super().__init__(db_op=actual_db)
         
-        # --- ADR-008 & Configuration Mapping ---
-        # Load scraper-specific config from config.yaml
-        self.scraper_cfg = self.config.get('scrapers', {}).get('price_ohlcv', {})
-        
-        # 1. Mode Settings
-        self.is_bulk_task = self.scraper_cfg.get('is_bulk', False)
-        self.needs_driver = self.scraper_cfg.get('needs_driver', False)
-        self.batch_size = self.scraper_cfg.get('batch_size', 50)
-        
-        # 2. Session-Based Dynamic Configuration
-        # Retrieve the specific settings for the current session (pre_close / post_close)
-        session_cfg = self.scraper_cfg.get('sessions', {}).get(session_type)
-        
-        if not session_cfg:
-            raise ValueError(f"Invalid session_type '{session_type}' provided for YahooScraper. "
-                             f"Available sessions: {list(self.scraper_cfg.get('sessions', {}).keys())}")
-        
-        # Dynamically set target table and API parameters based on session
-        self.target_table = session_cfg.get('target_table')
-        self.interval = session_cfg.get('interval')
-        self.range = session_cfg.get('range')
-        
-        # Base URL for API requests
-        self.base_url = self.scraper_cfg.get('base_url')
-        
-        if not self.target_table or not self.base_url:
-            raise KeyError("Missing critical configuration (target_table or base_url) for YahooScraper.")
+        # Lift configuration parameters to attributes for observability and testing
+        # These are loaded based on the 'scraper_name' defined in subclasses
+        cfg = self.config.get(self.scraper_name, {})
+        self.base_url = cfg.get('base_url')
+        self.interval = cfg.get('interval')
+        self.range = cfg.get('range')
 
     def scrape_all(self, driver: Optional[Any], symbols: List[str]) -> List[Dict[str, Any]]:
-        """Not used in Iterative Mode."""
-        raise NotImplementedError("YahooScraper operates in Iterative Mode only.")
+        """Yahoo OHLCV is strictly iterative."""
+        raise NotImplementedError("Yahoo scrapers operate in Iterative Mode only.")
 
     def scrape_one(self, driver: Optional[Any], symbol: str) -> Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]:
         """
@@ -63,11 +37,14 @@ class YahooScraper(BaseScraper):
         Returns a list of records (One-to-Many).
         """
         ticker = symbol.upper()
-        # Construct the dynamic URL based on session parameters
+        
+        if not self.base_url or not self.interval or not self.range:
+            logger.error(f"Configuration Error: Missing parameters for {self.scraper_name}")
+            return None
+
         url = f"{self.base_url}{ticker}?interval={self.interval}&range={self.range}"
         
         try:
-            # Use a browser-like User-Agent to prevent 403/429 errors
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
@@ -76,7 +53,6 @@ class YahooScraper(BaseScraper):
             response.raise_for_status()
             
             json_data = response.json()
-            # Navigate the Yahoo JSON structure: chart -> result[0]
             result = json_data.get('chart', {}).get('result', [None])[0]
             
             if not result or 'timestamp' not in result:
@@ -88,21 +64,18 @@ class YahooScraper(BaseScraper):
             
             extracted_records = []
             for i, ts in enumerate(timestamps):
-                # --- Data Quality Filter ---
-                # 1. Only keep records that fall exactly on the hour (solves the +1 offset problem)
-                # Note: This filter is applied for hourly intervals.
+                # Data Quality Filter: Only keep records exactly on the hour for 1h interval
+                # This solves the common Yahoo API offset problem
                 if self.interval == "1h" and ts % 3600 != 0:
                     continue
                 
-                # 2. Skip records with missing close price to ensure data integrity
                 close_price = quotes['close'][i]
                 if close_price is None:
                     continue
                 
-                # Map to ODS structure. 
-                # All values are passed as-is; DbOperator will coerce them to VARCHAR2.
+                # Map to ODS structure. All values coerced to string for VARCHAR2 storage.
                 extracted_records.append({
-                    "CODE": symbol.upper(),
+                    "CODE": ticker,
                     "RAW_TIMESTAMP": str(ts),
                     "OPEN_PRICE": str(quotes['open'][i]) if quotes['open'][i] is not None else None,
                     "HIGH_PRICE": str(quotes['high'][i]) if quotes['high'][i] is not None else None,
@@ -116,12 +89,24 @@ class YahooScraper(BaseScraper):
                 
             return extracted_records
 
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 404:
-                logger.warning(f"Symbol {ticker} not found on Yahoo Finance.")
-            else:
-                logger.error(f"HTTP error fetching Yahoo data for {symbol}: {e}")
-            return None
         except Exception as e:
-            logger.error(f"Unexpected error processing Yahoo data for {symbol}: {e}")
+            logger.error(f"Error processing Yahoo data for {symbol}: {e}")
             return None
+
+# ==============================================================================
+# Concrete Implementations (The "Plugins")
+# ==============================================================================
+
+class YahooPreScraper(YahooBase):
+    """
+    Identity: Pre-Close OHLCV.
+    Maps to 'price_ohlcv_pre' in config.yaml.
+    """
+    scraper_name = "price_ohlcv_pre"
+
+class YahooPostScraper(YahooBase):
+    """
+    Identity: Post-Close OHLCV.
+    Maps to 'price_ohlcv_post' in config.yaml.
+    """
+    scraper_name = "price_ohlcv_post"

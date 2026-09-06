@@ -69,9 +69,9 @@ afr:
 
 # Extractor #3: Shortman
 short:
-  url: "" # To be filled during short audit
-  target_table: "ODS_SHORT_POSITION"
-  symbol_source: "EQUITY.VW_TARGET_SYMBOLS" # DB View
+  url: "https://www.shortman.com.au/downloadeddata/latest.csv"
+  target_table: "ODS_SHORT_POSITIONS"
+  #symbol_source: "EQUITY.VW_TARGET_SYMBOLS" # DB View
   is_bulk: false
   needs_driver: false
   batch_size: 50
