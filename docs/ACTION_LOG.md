@@ -493,6 +493,42 @@ Shift all symbol filtering and universe definition from the Python `SymbolProvid
 
 ---
 
+### ADR-017: Pre-Production Environment & Truth-Based Verification
+
+| Field | Value |
+|---|---|
+| **Status** | Approved |
+| **Date** | 2026-09-07 |
+
+#### 1. Background
+During the development and audit of the `AnncScraper`, it was identified that traditional unit testing using `unittest.mock.patch` (returning static mock data) created a "false sense of security." While the database ingestion pipeline was verified, the actual connectivity to the ASX website and the accuracy of the DOM parsing remained unproven. Given the extreme 1GB RAM constraint of the OCI Micro VM, "it works on my machine" is an unacceptable benchmark for production readiness.
+
+#### 2. Decisions
+
+**ADR-017.1: Mandatory Pre-Production (Pre-Prod) Environment**
+- Establish a separate Ubuntu Server instance that is a **1:1 mirror** of the production OCI Micro VM (1GB RAM, Ubuntu 24.04 LTS).
+- All scrapers must be verified in this environment before being promoted to production.
+- This environment will be used to profile actual memory peaks (via `htop`) and verify the effectiveness of `cleanup_vm.sh` and `BaseScraper` batching logic.
+
+**ADR-017.2: Shift to Truth-Based Verification**
+- Abandon "Mock-only" tests for final integration.
+- Implement "Truth-Based" tests: The system must execute the full pipeline (`Fetch` $\rightarrow$ `Backup` $\rightarrow$ `Insert`) using real URLs and real database connections.
+- **Sampling Requirement**: To ensure transparency, the system must log a sample of the first and last 3 records of the extracted dataset to the console during verification to allow immediate human validation of data integrity.
+
+**ADR-017.3: Deployment Sequence**
+- The deployment order is strictly defined as: 
+  `Local Dev` $\rightarrow$ `Pre-Prod VM (Stress/Truth Test)` $\rightarrow$ `Production VM`.
+
+#### 3. Consequences
+
+| Description |
+|---|
+| **Pros** | Eliminates "Mock-based deception"; guarantees that the system can operate within 1GB RAM; ensures that DOM changes on the source website are detected before production failure. |
+| **Cons** | Increases infrastructure overhead (requires an additional VM); increases the time required for the QA cycle. |
+
+---
+
+
 ## 4. Implementation Progress (Current State)
 
 ### Foundation Layer (Completed)

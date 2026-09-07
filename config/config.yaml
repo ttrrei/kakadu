@@ -56,45 +56,55 @@ price_ohlcv_post:
   interval: "1h"
   range: "3d"
 
-# Extractor #2: AFR Quote & Tick
+# Extractor #2: AFR Quote & Tick (Now Tick only)
 afr:
-  url: "" # To be filled during afr audit
-  target_tables: 
-    tick: "ODS_PRICE_TICK"
-    quote: "ODS_PRICE_QUOTE_EAV"
-  symbol_source: "EQUITY.VW_TARGET_SYMBOLS" # DB View
+  url: "https://api.afr.com/graphql"
+  symbol_source: "EQUITY.VW_TOP_100_COMPANIES" # DB View
+  target_table: "ODS_PRICE_TICK"
   is_bulk: false
   needs_driver: false
   batch_size: 50
+  max_workers: 20
 
 # Extractor #3: Shortman
 short:
-  url: "" # To be filled during short audit
-  target_table: "ODS_SHORT_POSITION"
-  symbol_source: "EQUITY.VW_TARGET_SYMBOLS" # DB View
+  url: "https://www.shortman.com.au/downloadeddata/latest.csv"
+  target_table: "ODS_SHORT_POSITIONS"
+  #symbol_source: "EQUITY.VW_TARGET_SYMBOLS" # DB View
   is_bulk: false
   needs_driver: false
   batch_size: 50
 
 # Extractor #4: ASX Announcements (Selenium)
+# Extractor #4: ASX Announcements (Selenium)
 annc:
-  url: "https://www.asx.com.au/markets/company/"
+  # 真实的汇总页 URL
+  urls: 
+    - "https://www.asx.com.au/asx/v2/statistics/todayAnns.do"
+    - "https://www.asx.com.au/asx/v2/statistics/prevBusDayAnns.do"
   target_table: "ODS_MARKET_ANNC"
-  symbol_source: "EQUITY.VW_TARGET_SYMBOLS" # DB View
-  is_bulk: false
+  is_bulk: true
   needs_driver: true
-  batch_size: 20 # Smaller batch to prevent Selenium OOM
+  batch_size: 50
 
 # Extractor #6: Analyst Consensus (Split per ADR-011)
-analyst_consensus:
-  url: "" # To be filled during analyst_consensus audit
-  target_tables:
-    trends: "ODS_ANALYST_TRENDS"
-    targets: "ODS_ANALYST_TARGETS"
-  symbol_source: "EQUITY.VW_TARGET_SYMBOLS" # DB View
+# Extractor #6a: Analyst Trends
+analyst_trends:
+  symbol_source: "EQUITY.VW_TOP_100_COMPANIES"
+  target_table: "ODS_ANALYST_TRENDS"
   is_bulk: false
   needs_driver: false
   batch_size: 50
+  max_workers: 10
+
+# Extractor #6b: Analyst Targets
+analyst_targets:
+  symbol_source: "EQUITY.VW_TOP_100_COMPANIES"
+  target_table: "ODS_ANALYST_TARGETS"
+  is_bulk: false
+  needs_driver: false
+  batch_size: 50
+  max_workers: 10
 
 # --- Alerting Strategy (SAD Section 6) ---
 alerting:

@@ -2,8 +2,15 @@
 import unittest
 from unittest.mock import patch, MagicMock
 import logging
+import sys
+import os
+
+# Ensure src is in path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from src.scrapers.short_scraper import ShortPositionScraper
 from src.db_operator import db as db_operator
+from src.config import config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -11,8 +18,8 @@ logger = logging.getLogger(__name__)
 class TestShortScraper(unittest.TestCase):
 
     def setUp(self):
-        self.mock_db = MagicMock()
-        self.scraper = ShortPositionScraper(db_op=self.mock_db)
+        """Initialize scraper. BaseScraper handles config loading."""
+        self.scraper = ShortPositionScraper()
 
     def test_scrape_all_success(self):
         """Unit Test: Verify basic parsing logic with standard CSV content."""
@@ -55,20 +62,20 @@ EMPTY CORP,EMP,,,0.0"""
         try:
             logger.info("Starting End-to-End Integration Test for ShortPositionScraper...")
             
-            # 1. 使用真实的 db_operator
-            real_scraper = ShortPositionScraper(db_op=db_operator)
+            # 1. Use the real scraper
+            real_scraper = ShortPositionScraper()
             
-            # 2. 定义参数
-            target_table = "EQUITY.ODS_SHORT_POSITIONS"
-            job_name = "TEST_SHORT_E2E"
+            # 2. Get target table from config
+            target_table = config.get('short', {}).get('target_table', "ODS_SHORT_POSITION")
+            job_name = "TEST_SHORT_E2E_RUN"
             
-            # 3. 执行全链路
-            real_scraper.run([], target_table, job_name)
+            # 3. Execute full pipeline (Corrected method signature)
+            real_scraper.run(job_name=job_name)
             
-            # 4. 验证 BATCH_ID 匹配的数据是否存在
+            # 4. Verify BATCH_ID matching data exists in Oracle
             conn = db_operator.get_connection()
             cursor = conn.cursor()
-            sql = f"SELECT COUNT(*) FROM {target_table} WHERE BATCH_ID = :bid"
+            sql = f'SELECT COUNT(*) FROM {target_table} WHERE "BATCH_ID" = :bid'
             cursor.execute(sql, bid=job_name)
             count = cursor.fetchone()[0]
             cursor.close()

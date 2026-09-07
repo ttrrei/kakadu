@@ -8,7 +8,6 @@ from typing import Any, List, Dict, Optional
 from selenium.webdriver.chrome.webdriver import WebDriver
 
 from ..base_scraper import BaseScraper
-from ..db_operator import db as db_operator
 
 logger = logging.getLogger(__name__)
 
@@ -16,22 +15,29 @@ class ShortPositionScraper(BaseScraper):
     """
     Scraper for ASX Short Positions via Shortman CSV export.
     Implements Bulk Mode: Fetches the entire market short position list.
+    
+    Adheres to ADR-015 (Identity-based Config).
     """
 
-    def __init__(self, db_op: Optional[Any] = None):
-        actual_db = db_op if db_op is not None else db_operator
-        super().__init__(actual_db)
-        
-        self.is_bulk_task = True 
-        self.needs_driver = False
-        self.target_table = "ODS_SHORT_POSITIONS"
+    # Identity for configuration mapping in config.yaml
+    scraper_name = "short"
+    
+    # Default task attributes (can be overridden by config.yaml)
+    is_bulk_task = True 
+    needs_driver = False
 
     def scrape_all(self, driver: Optional[WebDriver], symbols: List[str]) -> List[Dict[str, Any]]:
         """
         Fetches the Shortman CSV and parses it into a list of dicts.
-        All extracted values are converted to strings to align with ODS VARCHAR design.
+        All extracted values are coerced to strings to align with ODS VARCHAR design.
         """
-        target_url = "https://www.shortman.com.au/downloadeddata/latest.csv"
+        # ADR-015: Retrieve URL from the top-level scraper node in config.yaml
+        cfg = self.config.get(self.scraper_name, {})
+        target_url = cfg.get('url')
+        
+        if not target_url:
+            logger.error(f"Configuration Error: 'url' for {self.scraper_name} not found in config.yaml")
+            return []
         
         try:
             logger.info(f"Fetching Short Positions CSV from: {target_url}")
@@ -43,10 +49,8 @@ class ShortPositionScraper(BaseScraper):
             
             extracted_data = []
             for row in reader:
-                # Mapping based on the CSV structure provided
-                # We use str(row.get(...) or "") to ensure that None values become empty strings
-                # and all data is stored as VARCHAR in ODS.
-                
+                # Mapping based on Shortman CSV structure
+                # We ensure all values are stripped strings and remove thousands-separator commas
                 extracted_data.append({
                     "PRODUCT_NAME": str(row.get("Product", "") or "").strip(),
                     "CODE": str(row.get("Product Code", "") or "").strip(),
