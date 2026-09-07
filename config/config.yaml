@@ -56,16 +56,15 @@ price_ohlcv_post:
   interval: "1h"
   range: "3d"
 
-# Extractor #2: AFR Quote & Tick
+# Extractor #2: AFR Quote & Tick (Now Tick only)
 afr:
-  url: "" # To be filled during afr audit
-  target_tables: 
-    tick: "ODS_PRICE_TICK"
-    quote: "ODS_PRICE_QUOTE_EAV"
-  symbol_source: "EQUITY.VW_TARGET_SYMBOLS" # DB View
+  url: "https://api.afr.com/graphql"
+  symbol_source: "EQUITY.VW_TOP_100_COMPANIES" # DB View
+  target_table: "ODS_PRICE_TICK"
   is_bulk: false
   needs_driver: false
   batch_size: 50
+  max_workers: 20
 
 # Extractor #3: Shortman
 short:
@@ -77,13 +76,16 @@ short:
   batch_size: 50
 
 # Extractor #4: ASX Announcements (Selenium)
+# Extractor #4: ASX Announcements (Selenium)
 annc:
-  url: "https://www.asx.com.au/markets/company/"
+  # 真实的汇总页 URL
+  urls: 
+    - "https://www.asx.com.au/asx/v2/statistics/todayAnns.do"
+    - "https://www.asx.com.au/asx/v2/statistics/prevBusDayAnns.do"
   target_table: "ODS_MARKET_ANNC"
-  symbol_source: "EQUITY.VW_TARGET_SYMBOLS" # DB View
-  is_bulk: false
+  is_bulk: true
   needs_driver: true
-  batch_size: 20 # Smaller batch to prevent Selenium OOM
+  batch_size: 50
 
 # Extractor #6: Analyst Consensus (Split per ADR-011)
 # Extractor #6a: Analyst Trends

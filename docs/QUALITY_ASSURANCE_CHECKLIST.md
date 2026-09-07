@@ -107,8 +107,8 @@ Execute in three distinct phases. Do not proceed to the next phase until all ite
 
 ### Scraper Implementations
 - [x] `price_ohlcv` (YahooPre/Post)
-- [ ] `afr`
+- [x] `afr`
 - [x] `short`
-- [ ] `annc`
+- [x] `annc`
 - [x] `company_master`
 - [x] `analyst_consensus`

@@ -1,79 +1,94 @@
 # src/scrapers/annc_scraper.py
-
+from __future__ import annotations
 import logging
 from typing import List, Dict, Any, Optional
 from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webdriver import WebDriver
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
 
-from src.base_scraper import BaseScraper
+from ..base_scraper import BaseScraper
+
+logger = logging.getLogger(__name__)
 
 class AnncScraper(BaseScraper):
     """
     ASX Company Announcements Scraper.
-    Implements the 'Bulk' extraction pattern per ADR-008.
+    Implements Bulk Mode: Fetches all announcements from summary pages.
+    
+    Adheres to ADR-015 (Identity-based Config) and production parsing logic.
     """
 
-    # 提取选择器为类属性，便于未来移入 config.yaml
-    TABLE_SELECTOR = (By.TAG_NAME, "announcement_data")
-    ROW_SELECTOR = (By.TAG_NAME, "tr")
-    COL_SELECTOR = (By.TAG_NAME, "td")
+    # Identity for configuration mapping in config.yaml
+    scraper_name = "annc"
+    
+    # Default task attributes
+    is_bulk_task = True
+    needs_driver = True
 
-    def __init__(self):
-        super().__init__()
-        self.is_bulk_task = True
-        self.logger = logging.getLogger(__name__)
-
-    def scrape_all(self, driver: WebDriver, symbols: List[str] = None) -> List[Dict[str, Any]]:
+    def scrape_all(self, driver: Optional[WebDriver], symbols: List[str] = None) -> List[Dict[str, Any]]:
         """
-        Extracts all announcement records from the current page.
+        Iterates through configured summary URLs and extracts announcement data.
         """
-        self.logger.info("Starting announcement extraction...")
-        results = []
+        if not driver:
+            logger.error("WebDriver is required for AnncScraper but was not provided.")
+            return []
 
-        try:
-            # 定位表格主体
-            table_body = driver.find_element(*self.TABLE_SELECTOR).find_element(By.TAG_NAME, "tbody")
-            rows = table_body.find_elements(*self.ROW_SELECTOR)
-            
-            self.logger.info(f"Found {len(rows)} potential announcement rows.")
+        cfg = self.config.get(self.scraper_name, {})
+        urls = cfg.get('urls', [])
+        
+        if not urls:
+            logger.error(f"Configuration Error: 'urls' list missing for {self.scraper_name} in config.yaml")
+            return []
 
-            for row in rows:
-                try:
-                    cols = row.find_elements(*self.COL_SELECTOR)
-                    if len(cols) < 4:
+        all_extracted_data = []
+
+        for url in urls:
+            try:
+                logger.info(f"Fetching announcements from: {url}")
+                driver.get(url)
+                
+                # --- 生产环境真实解析逻辑开始 ---
+                # 1. 定位表格主体
+                # 路径: announcement_data -> tbody -> tr
+                table_body = driver.find_element(By.TAG_NAME, "announcement_data") \
+                                   .find_element(By.TAG_NAME, "tbody")
+                rows = table_body.find_elements(By.TAG_NAME, 'tr')
+                
+                page_records = []
+                for row in rows:
+                    cols = row.find_elements(By.TAG_NAME, 'td')
+                    
+                    if len(cols) == 0:
                         continue
-
-                    # 业务逻辑：敏感度判断
-                    raw_sensitive = cols[2].text
-                    if raw_sensitive == '':
+                    
+                    # 敏感度判定逻辑 (完全还原生产代码)
+                    # info[2] 是敏感度列
+                    sensitive_text = cols[2].text
+                    if sensitive_text == '':
                         psensitive = 'True'
-                    elif raw_sensitive.strip() == '':
+                    elif sensitive_text == ' ':
                         psensitive = 'False'
                     else:
                         psensitive = 'Other'
-
-                    # 构建记录 (仅包含业务列)
+                    
+                    # 构建记录 (注意：UUID 由 DbOperator 自动注入，这里无需手动添加)
                     record = {
                         "CODE": cols[0].text.strip(),
                         "RELEASE_DATE": cols[1].text.replace("\n", " ").strip(),
                         "PSENSITIVE": psensitive,
                         "TITLE": cols[3].text.replace("\n", " ").strip()
                     }
-                    results.append(record)
+                    page_records.append(record)
+                
+                logger.info(f"Successfully extracted {len(page_records)} records from {url}")
+                all_extracted_data.extend(page_records)
+                # --- 生产环境真实解析逻辑结束 ---
 
-                except Exception as row_err:
-                    self.logger.warning(f"Skipping a row due to error: {row_err}")
-                    continue
+            except Exception as e:
+                logger.error(f"Failed to scrape announcement page {url}: {e}")
+                # 继续处理下一个 URL，确保最大数据产出
 
-        except (NoSuchElementException, TimeoutException) as e:
-            self.logger.error(f"Failed to locate announcement table: {e}")
-        except Exception as e:
-            self.logger.error(f"Unexpected error during scrape_all: {e}")
+        return all_extracted_data
 
-        self.logger.info(f"Successfully extracted {len(results)} records.")
-        return results
-
-    def scrape_one(self, driver: WebDriver, symbol: str) -> Optional[List[Dict[str, Any]]]:
+    def scrape_one(self, driver: Optional[WebDriver], symbol: str) -> Optional[Dict[str, Any]]:
         """Not implemented for Bulk mode."""
-        return None
+        raise NotImplementedError("AnncScraper operates in Bulk Mode only.")
