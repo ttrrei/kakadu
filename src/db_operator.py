@@ -128,7 +128,7 @@ class DbOperator:
         sql = f"INSERT INTO {table_name} ({cols_sql}) VALUES ({binds_sql})"
 
         # Execute in small chunks
-        batch_size = getattr(self.config, "BATCH_SIZE", 10)
+        batch_size = getattr(self.config, "insert_batch_size", 10)
         
         conn = self.get_connection()
         cursor = conn.cursor()

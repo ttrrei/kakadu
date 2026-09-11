@@ -1,89 +1,80 @@
-# Kakadu System State Snapshot & Integration Roadmap
+# Kakadu Integration Roadmap
 
-## 📌 System Context (The "North Star")
-- **Philosophy**: "Thin-Edge, Thick-Core" (Python is a stateless collector; Oracle PL/SQL handles all logic).
-- **Constraint**: Strict 1GB RAM limit (OCI Micro VM).
-- **Core Principle**: Zero-Loss Data Pipeline (`Fetch` $\rightarrow$ `Local Backup` $\rightarrow$ `DB Insert` $\rightarrow$ `Cloud Sync` $\rightarrow$ `Purge`).
+## Current System State
 
----
+**Foundation Layer (Certified):** config, db_operator, symbol_provider, base_scraper, backup_manager, and upload_manager have all passed rigorous audits.
 
-## ✅ Verified Infrastructure (The Foundation)
-The following components have passed rigorous integration and unit testing and are considered "Certified":
+**Scraper Layer (Verified):** price_ohlcv, afr, annc, short, company_master, and consensus have been standardized and passed End-to-End (E2E) Truth Tests.
 
-1. **Configuration (`src/config.py`)**: 
-   - Implements Dual-File loading (`.env` + `config.yaml`).
-   - **ADR-015**: Hierarchical priority implemented: `Scraper-specific` $\rightarrow$ `System-global` $\rightarrow$ `Code default`.
-   - **Structure**: Flat top-level configuration for scrapers to ensure direct resolution by `BaseScraper`.
-2. **Database Operator (`src/db_operator.py`)**:
-   - **Thin Mode**: `python-oracledb` in Thin Mode (No Instant Client).
-   - **Robustness**: Implements "Batch-to-Single" fallback for maximum data yield.
-   - **Audit Injection**: Automatically injects `BATCH_ID` (UUID) and `LOAD_TIME` (ISO-8601) into all ODS writes.
-3. **Symbol Provider (`src/symbol_provider.py`)**:
-   - **ADR-016**: Business filtering pushed to DB Views. Python layer is now a pure O(1) memory generator.
-   - **Robustness**: Handles dirty data (whitespace, case, missing suffixes) with standardized formatting.
-4. **Base Scraper (`src/base_scraper.py`)**:
-   - **Memory Safety**: Direct generator iteration (no `list()` conversion).
-   - **Performance**: Implements local buffering $\rightarrow$ batch flush to DB.
-   - **Resource Lifecycle**: Guaranteed WebDriver `quit()` in `finally` blocks.
-5. **Backup & Upload (`src/backup_manager.py` & `src/upload_manager.py`)**:
-   - **ADR-014**: Decoupled Local Persistence from Cloud Sync.
-   - **Robustness**: Atomic writes via temp-file-and-rename; format-agnostic ZIP compression.
+**Configuration Layer (Aligned):** 
+- `config.yaml` implements identity-based configuration
+- `is_bulk` flags are perfectly synchronized with Scraper implementations
 
 ---
 
-## 🛠 Current Architecture State
-- **ODS Schema**: Aligned with `install_ods_tables.sql`. All business columns are `VARCHAR2`.
-- **Price Routing**: Shifted from internal session matrices to **Class-based Routing** (e.g., `price_ohlcv_pre` vs `price_ohlcv_post` as distinct scraper identities).
-- **Scraper Status**: Most scrapers have pivoted from Selenium to API-based ingestion to save RAM (except `annc`).
+## Remaining Critical Path
+
+### Phase 1: Main Orchestration (main.py)
+
+**Goal:** Transform independent components into an automated pipeline, achieving "one-click execution with zero manual intervention."
+
+- [ ] **CLI Dispatcher Implementation**
+  - Implement argparse to support `--task` (e.g., `--task annc`)
+  - Implement `--session-type` (e.g., pre-close vs post-close) to route tasks correctly
+
+- [ ] **Startup Health Check**
+  - Validate existence of Oracle Wallet directory
+  - Verify all critical environment variables in `.env` are present
+  - SymbolProvider Probe: Attempt to fetch a single symbol from the DB; if it fails, terminate the job immediately with a critical error to prevent "silent failure"
+
+- [ ] **Lifecycle Orchestration**
+  - Implement the strict execution flow: Config Loading → Scraper.run() → UploadManager.sync_to_cloud() → Local Backup Purge
+
+- [ ] **Process Shielding (The Final Defense)**
+  - In the outermost `finally` block of `main.py`, explicitly invoke `cleanup_vm.sh` for any task where `needs_driver=True` to ensure zero Chrome process leakage
+
+- [ ] **Two-Tier Alerting Integration**
+  - **Tier 1 (Warning):** Compare local `.jsonl` row counts vs DB write counts; log a warning and retain backup if they mismatch
+  - **Tier 2 (Pushover):** Trigger external Pushover notifications for cumulative failures or bulk data missingness
 
 ---
 
-## 🚩 Remaining Critical Path (The "To-Do")
+### Phase 2: Production Deployment & Stress Testing
 
-### Phase 1: Scraper-by-Scraper Audit (High Priority)
-Since `BaseScraper` was refactored, all subclasses must be updated to remove redundant initialization and adhere to the new contract.
+**Goal:** Prove "Zero-Crash" and "Zero-Loss" claims on the 1GB RAM OCI Micro VM.
 
-- [ ] **`list_scraper.py`**: 
-    - Remove `__init__`.
-    - Update URL fetching to use `self.config.get(self.scraper_name, ...)` instead of nested `scrapers` node.
-    - Add `scraper_name = "company_master"`.
-- [ ] **`short_scraper.py`**: 
-    - Remove `__init__`.
-    - Remove hardcoded `target_table` and `is_bulk_task`.
-    - Add `scraper_name = "short"`.
-- [ ] **`yahoo_scraper.py`**: 
-    - Remove `__init__` and all `session_type` routing logic.
-    - Move `interval` and `range` resolution to `config.yaml` $\rightarrow$ `BaseScraper`.
-    - Add `scraper_name = "price_ohlcv_pre"` (and create `_post` variant).
-- [ ] **`afr_scraper.py`**: 
-    - Remove `__init__` and manual flag assignments.
-    - Add `scraper_name = "afr"`.
-- [ ] **`annc_scraper.py`**: 
-    - Remove `__init__` and manual flag assignments.
-    - Add `scraper_name = "annc"`.
-- [ ] **`consensus_scraper.py` (Major Refactor)**: 
-    - Remove custom `run()` method (bypass of `BaseScraper.run` causes buffer/backup failure).
-    - Implement `scrape_one()` to handle `yf.Ticker` logic.
-    - Implement `scrape_all()` as `NotImplementedError`.
-    - Add `scraper_name = "analyst_consensus"`.
+- [ ] **Environment Mirroring**
+  - Deploy the full stack on an Ubuntu 24.04 LTS VM
+  - Configure a 512MB Swap file as a last-resort safety net
 
-### Phase 2: Main Orchestration (`main.py`)
-- [ ] **CLI Dispatcher**: Implement `--task` and `--session-type` arguments.
-- [ ] **Startup Health Check**: Validate Wallet path, DB connectivity, and `SymbolProvider` health.
-- [ ] **Process Shielding**: Integrate `cleanup_vm.sh` in a `finally` block for browser tasks.
-- [ ] **Two-Tier Alerting**: Implement Tier 1 (Log) and Tier 2 (Pushover) notifications.
+- [ ] **Full-Market Truth Test**
+  - Execute full ingestion cycles (~2,000 symbols) and monitor memory peaks via `htop`
+  - Verify that `cleanup_vm.sh` completely flushes RAM after Selenium tasks
 
-### Phase 3: Performance Optimization (The Speed Gap)
-- **Problem**: Sequential processing of ~1,800 symbols is too slow for "Pre-close" decision support.
-- **Evaluation Needed**:
-    - **Option A**: `AsyncIO` (`httpx`) for concurrent API requests.
-    - **Option B**: `ThreadPoolExecutor` (already implemented in `BaseScraper`, needs tuning).
-    - **Option C**: Pivot to `yahooquery` (with strict "No-Pandas" rule).
+- [ ] **Failure Simulation**
+  - Simulate network outages → Verify local backup integrity
+  - Simulate DB connection timeouts → Verify DbOperator fallback mechanisms
 
 ---
 
-## 📝 Quick Reference for New Session
-- **Target Table for Price**: `ODS_PRICE_OHLCV_PRE` / `ODS_PRICE_OHLCV_POST`.
-- **Config Node for Global**: `system`.
-- **Config Node for Scrapers**: Top-level (e.g., `price_ohlcv_pre`).
-- **Critical Constraint**: Never load full symbol lists or large dataframes into memory.
+### Phase 3: Thick-Core (PL/SQL) Enhancement
+
+**Goal:** Push all business logic and transformations entirely into the Oracle Database.
+
+- [ ] **ODS Data Cleansing Procedures**
+  - Develop PL/SQL stored procedures to clean VARCHAR2 raw data and cast it to strong types
+  - Implement deduplication logic based on BATCH_ID
+
+- [ ] **Technical Indicator Engine**
+  - Implement incremental calculation procedures for EMA, PSAR, and Supertrend within the DB
+
+- [ ] **Signal Output Views**
+  - Create final analytical views (e.g., VW_TRADING_SIGNALS) for direct consumption by APIs/Reports
+
+---
+
+## Quick Reference
+
+- **Memory Red-Line:** Never use `list(generator)` or load large Pandas DataFrames in the Python layer.
+- **Persistence Principle:** Every DB write must be preceded by a BackupManager local save.
+- **Cleanup Principle:** Every Selenium-based task must terminate with a call to `cleanup_vm.sh`.

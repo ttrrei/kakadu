@@ -7,7 +7,7 @@
 system:
   log_level: "INFO"
   backup_dir: "/home/ubuntu/backup/"
-  max_workers: 20
+  max_workers: 10
   # Physical VM reboot is handled via crontab
 
 oci:
@@ -52,7 +52,7 @@ price_ohlcv_post:
   is_bulk: false
   needs_driver: false
   batch_size: 50
-  max_workers: 20
+  max_workers: 10
   interval: "1h"
   range: "3d"
 
@@ -64,16 +64,16 @@ afr:
   is_bulk: false
   needs_driver: false
   batch_size: 50
-  max_workers: 20
+  max_workers: 10
 
 # Extractor #3: Shortman
 short:
   url: "https://www.shortman.com.au/downloadeddata/latest.csv"
   target_table: "ODS_SHORT_POSITIONS"
   #symbol_source: "EQUITY.VW_TARGET_SYMBOLS" # DB View
-  is_bulk: false
+  is_bulk: true
   needs_driver: false
-  batch_size: 50
+  #batch_size: 50
 
 # Extractor #4: ASX Announcements (Selenium)
 # Extractor #4: ASX Announcements (Selenium)
@@ -85,7 +85,7 @@ annc:
   target_table: "ODS_MARKET_ANNC"
   is_bulk: true
   needs_driver: true
-  batch_size: 50
+  #batch_size: 50
 
 # Extractor #6: Analyst Consensus (Split per ADR-011)
 # Extractor #6a: Analyst Trends
