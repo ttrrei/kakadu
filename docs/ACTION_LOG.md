@@ -89,7 +89,7 @@
 
 ---
 
-### ADR-005: DbOperator Minimalist Architecture Refactoring — Removing contracts.py & ODS Audit Specifications
+### ADR-005: DbOperator Minimalist Architecture Refactoring
 
 | Field | Value |
 |---|---|
@@ -108,7 +108,7 @@ The earlier refactored `db_operator.py` was overly complex, mixing dynamic `MERG
 - Scraper layer doesn't need to handle metadata enrichment — just submit raw `List[Dict]` to `DbOperator`, achieving "zero boilerplate" and single-point defense control
 
 **ADR-005.2: Audit Column Simplification**
-- All ODS tables consistently retain only two audit columns: **`BATCH_ID`** (UUID v4 string) and **`LOAD_TIME`** (ISO-8601 string)
+- All ODS tables consistently retain only two audit columns: `BATCH_ID` (UUID v4 string) and `LOAD_TIME` (ISO-8601 string)
 - Completely remove `SOURCE_SYSTEM` / `datasource` fields. Since Kakadu ODS uses "one source, one table" design (e.g., `ODS_PRICE_OHLCV` belongs to Yahoo, `ODS_SHORT_POSITION` belongs to Shortman), table names inherently encode source information
 
 **ADR-005.3: OCI Backup Logic Decoupling**
@@ -121,7 +121,7 @@ The earlier refactored `db_operator.py` was overly complex, mixing dynamic `MERG
 **ADR-005.5: Unified Batch-First Interface Design**
 - Expose a unified `insert_batch(table_name, records, batch_id=None)` interface externally
 - Whether it's single Symbol multi-row OHLCV data or Shortman's large multi-row multi-column dataset, both accept `List[Dict[str, Any]]` directly
-- Internally uses `cursor.executemany()` to batch-append writes by `BATCH_SIZE` (5~10); if batch fails, automatically degrades to single `cursor.execute()` writes, logs exceptions, and skips dirty data
+- Internally uses `cursor.executemany()` to batch-append writes by `BATCH_SIZE` (5-10); if batch fails, automatically degrades to single `cursor.execute()` writes, logs exceptions, and skips dirty data
 
 #### 3. Consequences
 
@@ -130,11 +130,11 @@ The earlier refactored `db_operator.py` was overly complex, mixing dynamic `MERG
 
 ---
 
-### ADR-006: Configuration Separation — config.yaml + .env
+### ADR-006: Configuration Separation
 
 | Field | Value |
 |---|---|
-| **Status** | Proposed |
+| **Status** | Approved |
 | **Date** | 2026-07-30 |
 
 #### 1. Context
@@ -144,9 +144,9 @@ Sensitive credentials (database passwords, API keys, Pushover tokens, Wallet pat
 #### 2. Decision
 
 **ADR-006.1: Dual-File Configuration**
-- **`config.yaml`**: Non-sensitive configuration (data source URLs, ODS table names, log levels, batch sizes, etc.)
-- **`.env`**: Sensitive credentials (database password, API keys, Pushover tokens, etc.)
-- **`.env.example`**: Template file with placeholder values for reference
+- `config.yaml`: Non-sensitive configuration (data source URLs, ODS table names, log levels, batch sizes, etc.)
+- `.env`: Sensitive credentials (database password, API keys, Pushover tokens, etc.)
+- `.env.example`: Template file with placeholder values for reference
 
 **ADR-006.2: Directory Structure**
 
@@ -225,7 +225,7 @@ Implement a tiered architecture to ensure separation of concerns and data integr
 
 **ADR-008.2: Dual-Mode Execution Strategy**
 - **Bulk Mode** (`is_bulk_task = True`): Executes `scrape_all()`. Optimized for high-density pages. Data is collected in one pass and submitted to DbOperator in a single batch.
-- **Iterative Mode** (`is_bulk_task = False`): Executes `scrape_one()` within a loop. Optimized for detail pages. Implements a "Fetch -> Buffer -> Flush" cycle to minimize DB round-trips while keeping memory footprint low.
+- **Iterative Mode** (`is_bulk_task = False`): Executes `scrape_one()` within a loop. Optimized for detail pages. Implements a "Fetch to Buffer to Flush" cycle to minimize DB round-trips while keeping memory footprint low.
 
 **ADR-008.3: Isolation & Robustness (The "Shield" Pattern)**
 - In Iterative Mode, each `scrape_one()` call is wrapped in an independent try-except block.
@@ -243,7 +243,7 @@ Implement a tiered architecture to ensure separation of concerns and data integr
 
 ---
 
-### ADR-009: ListScraper Implementation Pivot (Selenium → API CSV)
+### ADR-009: ListScraper Implementation Pivot
 
 | Field | Value |
 |---|---|
@@ -285,7 +285,7 @@ Implement a tiered architecture to ensure separation of concerns and data integr
 
 ---
 
-### ADR-011: Analyst Consensus Implementation Pivot (Selenium → Yahoo API & Table Split)
+### ADR-011: Analyst Consensus Implementation Pivot
 
 | Field | Value |
 |---|---|
@@ -359,7 +359,7 @@ This violates the "Thin-Edge" principle and introduces memory, coupling, and mai
 
 ---
 
-### ADR-013: Cloud Backup Path Prefixing (Bucket Organization)
+### ADR-013: Cloud Backup Path Prefixing
 
 | Field | Value |
 |---|---|
@@ -386,7 +386,7 @@ Implement a hierarchical prefixing strategy for all cloud uploads to simulate a 
 
 ---
 
-### ADR-014: Decoupling Backup and Upload via Dedicated UploadManager
+### ADR-014: Decoupling Backup and Upload
 
 | Field | Value |
 |---|---|
@@ -395,15 +395,15 @@ Implement a hierarchical prefixing strategy for all cloud uploads to simulate a 
 
 #### 1. Background
 
-The current `BackupManager` implementation follows a "Fetch $\rightarrow$ Buffer $\rightarrow$ Flush (Upload)" synchronous cycle. This creates a significant performance bottleneck: the scraper must wait for the OCI Cloud upload to complete before processing the next batch of symbols. Integration tests showed that for ~1,800 symbols, this synchronous I/O overhead accounts for a large portion of the 15.5-minute total execution time, which is unacceptable for "Pre-close" real-time decision support.
+The current `BackupManager` implementation follows a "Fetch to Buffer to Flush" synchronous cycle. This creates a significant performance bottleneck: the scraper must wait for the OCI Cloud upload to complete before processing the next batch of symbols. Integration tests showed that for ~1,800 symbols, this synchronous I/O overhead accounts for a large portion of the 15.5-minute total execution time, which is unacceptable for "Pre-close" real-time decision support.
 
 #### 2. Decision
 
 Decouple the "Local Persistence" (Backup) from the "Cloud Synchronization" (Upload) by introducing a dedicated `UploadManager` and shifting to a **Batch-Compress-Upload** strategy.
 
 **ADR-014.1: Single Responsibility Refactoring**
-- **`BackupManager`**: Stripped of all cloud-related logic. Its sole responsibility is the high-speed persistence of raw data to the local disk.
-- **`UploadManager`**: A new standalone module responsible for the end-of-job synchronization lifecycle: `Local Folder` $\rightarrow$ `Compression (.zip)` $\rightarrow$ `Single Cloud Upload` $\rightarrow$ `Local Cleanup`.
+- `BackupManager`: Stripped of all cloud-related logic. Its sole responsibility is the high-speed persistence of raw data to the local disk.
+- `UploadManager`: A new standalone module responsible for the end-of-job synchronization lifecycle: Local Folder to Compression (.zip) to Single Cloud Upload to Local Cleanup.
 
 **ADR-014.2: Shift to Batch-Compress-Upload Pattern**
 - Abandon the "periodic flush" mechanism during the scraping phase.
@@ -412,7 +412,7 @@ Decouple the "Local Persistence" (Backup) from the "Cloud Synchronization" (Uplo
 
 **ADR-014.3: Orchestration via `main.py`**
 - The execution flow is now managed by `main.py` as follows:
-  `SymbolProvider` $\rightarrow$ `Scraper` $\rightarrow$ `BackupManager (Local Write)` $\rightarrow$ `UploadManager (Compress & Sync)` $\rightarrow$ `Purge`.
+  SymbolProvider to Scraper to BackupManager (Local Write) to UploadManager (Compress and Sync) to Purge.
 
 #### 3. Consequences
 
@@ -422,7 +422,8 @@ Decouple the "Local Persistence" (Backup) from the "Cloud Synchronization" (Uplo
 | **Cons** | **Latency**: Cloud data is only available after the entire job completes, not in real-time. **Disk Usage**: Temporary increase in local disk usage until the final purge. |
 
 ---
-### ADR-015: Architecture Upgrade — Dynamic Configuration-Driven Identity and Decoupled Symbol Sourcing
+
+### ADR-015: Dynamic Configuration-Driven Identity and Decoupled Symbol Sourcing
 
 | Field | Value |
 |---|---|
@@ -440,15 +441,15 @@ Introduce the **"Identity-based Configuration"** pattern to completely decouple 
 **2.1 Dynamic Configuration Loading Mechanism**
 - **Identity Definition**: Every scraper subclass must define a unique `scraper_name` attribute (e.g., `scraper_name = "price_ohlcv"`).
 - **Hierarchical Priority**: Implement a strict three-tier configuration resolution chain:
-  1. **Scraper-Specific**: `config.yaml` $\rightarrow$ `scrapers` $\rightarrow$ `{scraper_name}`
-  2. **System-Global**: `config.yaml` $\rightarrow$ `system` (Fallback for common parameters like `batch_size`)
+  1. **Scraper-Specific**: `config.yaml` to `scrapers` to `{scraper_name}`
+  2. **System-Global**: `config.yaml` to `system` (Fallback for common parameters like `batch_size`)
   3. **Code Default**: Hardcoded fallback values within the `BaseScraper` class.
 - **Mandatory Validation**: The `symbol_source` parameter is designated as a **Critical Config**. If it is missing from both the scraper-specific and system-global levels in `config.yaml`, the system must throw a `KeyError` at startup to prevent silent failures.
 
 **2.2 Decoupled SymbolProvider**
 - **Instance-Based Model**: Refactor `SymbolProvider` from a static utility to a configurable class.
 - **Dynamic Instantiation**: `BaseScraper` instantiates its own `SymbolProvider` instance at runtime, passing the `symbol_source` table name retrieved from the configuration.
-- **Pipeline Parameterization**: Ensure the entire `Fetch $\rightarrow$ Local Backup $\rightarrow$ DB Insert` pipeline is driven by these dynamically loaded parameters.
+- **Pipeline Parameterization**: Ensure the entire Fetch to Local Backup to DB Insert pipeline is driven by these dynamically loaded parameters.
 
 #### 3. Consequences
 | Description |
@@ -457,14 +458,14 @@ Introduce the **"Identity-based Configuration"** pattern to completely decouple 
 | **Cons**: Every new scraper subclass must explicitly define the `scraper_name` attribute to enable configuration mapping. |
 
 #### 4. Implementation Details
-- **`src/base_scraper.py`**: Refactor `__init__` and `_run_iterative` to implement the hierarchical config lookup and dynamic `SymbolProvider` instantiation.
-- **`src/symbol_provider.py`**: Upgrade `SymbolProvider` to a class that accepts `source_table` as an argument; remove global static generators.
-- **`src/scrapers/`**: Update all scrapers (e.g., `price_ohlcv`, `afr`) to define their respective `scraper_name`.
-- **`test/`**: Implement validation tests to ensure the priority chain (`Specific` $\rightarrow$ `System` $\rightarrow$ `Default`) is strictly honored.
+- `src/base_scraper.py`: Refactor `__init__` and `_run_iterative` to implement the hierarchical config lookup and dynamic `SymbolProvider` instantiation.
+- `src/symbol_provider.py`: Upgrade `SymbolProvider` to a class that accepts `source_table` as an argument; remove global static generators.
+- `src/scrapers/`: Update all scrapers (e.g., `price_ohlcv`, `afr`) to define their respective `scraper_name`.
+- `test/`: Implement validation tests to ensure the priority chain (Specific to System to Default) is strictly honored.
 
 ---
 
-### ADR-016: Symbol Filtering Logic Migration (Python $\rightarrow$ SQL View)
+### ADR-016: Symbol Filtering Logic Migration
 
 | Field | Value |
 |---|---|
@@ -512,12 +513,12 @@ During the development and audit of the `AnncScraper`, it was identified that tr
 
 **ADR-017.2: Shift to Truth-Based Verification**
 - Abandon "Mock-only" tests for final integration.
-- Implement "Truth-Based" tests: The system must execute the full pipeline (`Fetch` $\rightarrow$ `Backup` $\rightarrow$ `Insert`) using real URLs and real database connections.
+- Implement "Truth-Based" tests: The system must execute the full pipeline (Fetch to Backup to Insert) using real URLs and real database connections.
 - **Sampling Requirement**: To ensure transparency, the system must log a sample of the first and last 3 records of the extracted dataset to the console during verification to allow immediate human validation of data integrity.
 
 **ADR-017.3: Deployment Sequence**
-- The deployment order is strictly defined as: 
-  `Local Dev` $\rightarrow$ `Pre-Prod VM (Stress/Truth Test)` $\rightarrow$ `Production VM`.
+- The deployment order is strictly defined as:
+  Local Dev to Pre-Prod VM (Stress/Truth Test) to Production VM.
 
 #### 3. Consequences
 
@@ -528,12 +529,12 @@ During the development and audit of the `AnncScraper`, it was identified that tr
 
 ---
 
-### ADR-018: Orchestration Layer Design — Service-Oriented Pipeline & Process Shielding
+### ADR-018: Orchestration Layer Design
 
 | Field | Value |
 |---|---|
 | **Status** | Approved |
-| **Date** | 202X-XX-XX |
+| **Date** | 2026-09-10 |
 
 #### 1. Background
 With the Foundation Layer and Scraper Layer certified, the system requires a centralized orchestrator (`main.py`) to transform independent components into an automated production pipeline. The orchestrator must manage the full lifecycle—from environment validation to resource cleanup—while strictly adhering to the 1GB RAM constraint and "Zero-Loss" principle.
@@ -553,8 +554,8 @@ With the Foundation Layer and Scraper Layer certified, the system requires a cen
 
 **ADR-018.3: Two-Tier Alerting Integration**
 - Integrate an `AlertManager` to execute the BRD-defined alerting strategy:
-  - **Tier 1 (Warning)**: Local `.jsonl` vs DB row-count mismatch $\rightarrow$ Log Warning + Retain Backup.
-  - **Tier 2 (Critical)**: Systemic crashes or bulk data missingness $\rightarrow$ Trigger Pushover API notification.
+  - **Tier 1 (Warning)**: Local `.jsonl` vs DB row-count mismatch, then Log Warning and Retain Backup.
+  - **Tier 2 (Critical)**: Systemic crashes or bulk data missingness, then Trigger Pushover API notification.
 - **Rationale**: Suppresses transient noise while ensuring zero-tolerance for systemic data loss.
 
 **ADR-018.4: Scraper Factory Pattern**
@@ -577,17 +578,27 @@ With the Foundation Layer and Scraper Layer certified, the system requires a cen
 
 ## 4. Implementation Progress (Current State)
 
-### Foundation Layer (Completed)
+### Foundation & Scraper Layer (Certified)
 
-- **Configuration**: Implemented src/config.py with dual-file loading (.env + config.yaml) per ADR-006
-- **Database Operator**: Implemented src/db_operator.py as a Pure-INSERT engine with automatic audit injection (BATCH_ID, LOAD_TIME) and row-level fallback per ADR-005
-- **Schema Initialization**: Created sql/install_equity_schema.sql establishing the EQUITY user, SYS_BATCH_LOG, and core ADB privileges
-- **Scraper Framework**: Implemented src/base_scraper.py using the Template Method pattern, supporting both Bulk and Iterative modes with built-in Selenium lifecycle management per ADR-008
-- **Symbol Provider**: Implemented centralized SymbolProvider for iterative scrapers per ADR-012
+- **Configuration**: Implemented `src/config.py` with dual-file loading per ADR-006
+- **Database Operator**: Implemented `src/db_operator.py` as a Pure-INSERT engine per ADR-005
+- **Scraper Framework**: Implemented `src/base_scraper.py` and all 6 target scrapers, verified via Truth-Based Tests per ADR-017
+- **Symbol Provider**: Implemented centralized `SymbolProvider` with SQL View support per ADR-012 and ADR-016
+- **Backup & Upload**: Implemented `BackupManager` and `UploadManager` for decoupled cloud sync per ADR-014
+
+### Orchestration Layer (In Progress)
+
+- **Service Components**: Implemented and unit-tested `StartupHealthChecker`, `AlertManager`, and `ScraperFactory` per ADR-018
 
 ### Current Focus
 
-**Audit Phase**: Conducting a comprehensive pre-integration audit on the `audit/pre-main-integration` branch to verify all scrapers against the 1GB RAM and "Thin-Edge" constraints before developing main.py.
+**Integration Phase**: Developing `main.py` to integrate all certified components into a production-ready pipeline.
+
+| Component | Status |
+|---|---|
+| `main.py` core orchestration | Pending |
+| Global `try...finally` process shielding | Pending |
+| CLI interface (argparse) | Pending |
 
 ---
 
@@ -595,9 +606,23 @@ With the Foundation Layer and Scraper Layer certified, the system requires a cen
 
 ### Priority Items
 
-- **Memory Optimization**: Profile and optimize data ingestion pipeline to reduce peak memory usage
-- **PL/SQL Performance Tuning**: Optimize indicator computation queries for faster signal generation
-- **Selenium Process Management**: Implement automated process cleanup between scheduled runs
-- **Alert Threshold Calibration**: Fine-tune noise-suppressed alerting thresholds based on historical failure patterns
-- **Simplified db_operator.py**: Rewrite db_operator.py per ADR-005 — remove MERGE INTO logic, strip OCI backup code, consolidate audit injection into `_prepare_records()`, expose single `insert_batch()` interface
-- **ODS DDL Scripts**: Rewrite `install_ods_tables.sql` for 7 ODS tables per ADR-007 data model
+| Item | Status | Reference |
+|---|---|---|
+| **Production Deployment**: Deploy to OCI Micro VM and verify 1GB RAM stability under full-market load (~2,000 symbols) | Planned | ADR-017 |
+| **PL/SQL Engine**: Implement the "Thick-Core" analytics (EMA, PSAR, Supertrend) | Planned | Roadmap Phase 4 |
+| **Alert Calibration**: Fine-tune Pushover thresholds based on real-world noise patterns | Planned | ADR-018.3 |
+| **Crontab Scheduling**: Configure AEST pre-market (15:25) and post-market (16:45) schedules | Planned | ADR-004 |
+| **Memory Stress Test**: Execute full ingestion cycles and monitor peak memory via htop | Planned | ADR-017 |
+
+### Completed Items (Moved from Future)
+
+- **Simplified db_operator.py**: Rewritten per ADR-005, removed MERGE INTO logic, stripped OCI backup code, consolidated audit injection
+- **ODS DDL Scripts**: Created `install_equity_schema.sql` for all ODS tables per ADR-007 data model
+- **Selenium Process Management**: Defined in ADR-018.5, to be implemented via global `finally` block in `main.py`
+
+### Long-Term Roadmap
+
+- **Phase 4: Thick-Core PL/SQL Analytics Engine**
+  - ODS Cleaning & Deduplication Procedures
+  - Technical Indicator Calculation (EMA, PSAR, Supertrend)
+  - Analytics Views (e.g., `VW_TRADING_SIGNALS`)
