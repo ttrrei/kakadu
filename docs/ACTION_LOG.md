@@ -528,6 +528,52 @@ During the development and audit of the `AnncScraper`, it was identified that tr
 
 ---
 
+### ADR-018: Orchestration Layer Design — Service-Oriented Pipeline & Process Shielding
+
+| Field | Value |
+|---|---|
+| **Status** | Approved |
+| **Date** | 202X-XX-XX |
+
+#### 1. Background
+With the Foundation Layer and Scraper Layer certified, the system requires a centralized orchestrator (`main.py`) to transform independent components into an automated production pipeline. The orchestrator must manage the full lifecycle—from environment validation to resource cleanup—while strictly adhering to the 1GB RAM constraint and "Zero-Loss" principle.
+
+#### 2. Decisions
+
+**ADR-018.1: Service-Oriented Component Architecture**
+- Implement `StartupHealthChecker` and `AlertManager` as **Service Classes** (Composition) rather than Base Classes (Inheritance).
+- **Rationale**: Prevents "Responsibility Pollution" in the `BaseScraper`. Scrapers should remain focused on data extraction, while system-level concerns (environment probes, Pushover notifications) are handled by the orchestrator.
+
+**ADR-018.2: Startup Health Probe (Anti-Silent Failure)**
+- Implement a mandatory `StartupHealthChecker` that validates:
+  - Oracle Wallet directory existence.
+  - Presence of critical `.env` variables.
+  - Database connectivity via a `SymbolProvider` probe (fetching a single symbol).
+- **Rationale**: In a headless cron environment, "silent failures" are the highest risk. The system must "fail fast" and terminate immediately if the environment is compromised.
+
+**ADR-018.3: Two-Tier Alerting Integration**
+- Integrate an `AlertManager` to execute the BRD-defined alerting strategy:
+  - **Tier 1 (Warning)**: Local `.jsonl` vs DB row-count mismatch $\rightarrow$ Log Warning + Retain Backup.
+  - **Tier 2 (Critical)**: Systemic crashes or bulk data missingness $\rightarrow$ Trigger Pushover API notification.
+- **Rationale**: Suppresses transient noise while ensuring zero-tolerance for systemic data loss.
+
+**ADR-018.4: Scraper Factory Pattern**
+- Implement a `ScraperFactory` to map CLI task strings (e.g., `--task annc`) to their corresponding Scraper classes.
+- **Rationale**: Decouples `main.py` from specific scraper implementations. Adding new data sources requires only a mapping update in the factory, not a modification of the orchestration logic (Open-Closed Principle).
+
+**ADR-018.5: Global Process Shielding (The Final Defense)**
+- Wrap the entire orchestration flow in a global `try...finally` block.
+- The `finally` block must explicitly invoke `cleanup_vm.sh` for any task requiring a browser driver.
+- **Rationale**: Ensures zero Chrome process leakage regardless of how the program terminates (success or crash), protecting the 1GB RAM limit.
+
+#### 3. Consequences
+
+| Description |
+|---|
+| **Pros** | Extreme robustness against environment issues; standardized alerting; high extensibility for new scrapers; guaranteed memory sanitization |
+| **Cons** | Slight increase in initial boilerplate (creation of 3 new service modules) |
+
+---
 
 ## 4. Implementation Progress (Current State)
 
