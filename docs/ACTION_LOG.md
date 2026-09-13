@@ -72,7 +72,8 @@
 
 **Context**: Heavy headless browser (Selenium) tasks need to be decoupled from lightweight API tasks in scheduling.
 
-**Decision**: Execute `cleanup_vm.sh` after runs to purge residual Chrome processes and prevent memory accumulation between scheduled jobs.
+**Decision**: Execute cleanup_vm.sh via an external Master Shell script (run_task.sh). The cleanup is performed both before and after the Python process execution. This ensures that even if the Python process crashes with a segmentation fault or is killed by the OS (OOM), the environment is sanitized for the next run.
+
 
 ---
 
@@ -85,7 +86,7 @@
 
 **Context**: System memory and OS caches may accumulate over time during continuous operation.
 
-**Decision**: Implement weekend bash + crontab physical VM reboot to completely flush system memory and OS caches, ensuring clean state for the next operational period.
+**Decision**: Implement a daily physical VM reboot via crontab during the longest period of system inactivity. This provides a "hard reset" of the OS kernel, flushes all memory fragments, and ensures a pristine state for the daily batch processing window.
 
 ---
 
@@ -576,10 +577,93 @@ With the Foundation Layer and Scraper Layer certified, the system requires a cen
 
 ---
 
+---
+
+### ADR-019: Pipeline Orchestration & External Monitoring
+
+| Field | Value |
+|---|---|
+| **Status** | Approved |
+| **Date** | 2026-09-12 |
+
+#### 1. Background
+
+As the system moves to production, two critical risks remain:
+1. **Silent Failures**: If the VM freezes, the network drops, or the system crashes before an alert is sent, the system fails silently, and data gaps are only discovered days later.
+2. **Residual Process Leakage**: While `main.py` has a `finally` block, a hard crash (e.g., Segmentation Fault or OOM Kill) can bypass Python's exception handling, leaving orphaned Chrome processes that compromise the 1GB RAM limit.
+3. **ETL Gap**: Raw data in ODS needs to be transformed into BDI/DMT layers via Oracle Stored Procedures, requiring a coordinated trigger mechanism.
+
+#### 2. Decisions
+
+**ADR-019.1: Master Shell Orchestration (The "Wrapper" Pattern)**
+- Transition from direct Python execution to a Master Shell script (`run_task.sh`).
+- The shell script enforces a strict execution sequence: 
+  `Pre-run Cleanup` $\rightarrow$ `Python Scraper` $\rightarrow$ `Python Transformer` $\rightarrow$ `Post-run Cleanup`.
+- This ensures environment sanitization regardless of the Python process's exit state.
+
+**ADR-019.2: External Heartbeat (The "Dead Man's Switch")**
+- Implement an external monitoring loop using Supabase.
+- The system sends a "Heartbeat" signal to a Supabase-backed monitor upon successful completion of the daily pipeline.
+- **Failure Logic**: If the monitor does not receive a signal within a 25-hour window, it triggers a high-priority "System Down" alert via Pushover.
+- **Rationale**: Shifts the monitoring paradigm from "Alert on Error" to "Alert on Silence."
+
+**ADR-019.3: Integrated DB Transformation Trigger**
+- Implement a `DbTransformer` service within the Python project.
+- This service is responsible for calling Oracle Stored Procedures to move data from ODS to BDI/DMT layers.
+- By keeping this in the Python project, it shares the existing `DbOperator` connection pool and `config.yaml` credentials.
+
+**ADR-019.4: Physical VM Hard-Reset**
+- Implement a daily physical VM reboot via `crontab` during the system's longest inactivity window.
+- **Rationale**: Completely flushes OS caches and kernel-level memory fragments, ensuring a pristine state for the next operational cycle.
+
+#### 3. Consequences
+
+| Description |
+|---|
+| **Pros** | **Zero-Silence**: Total visibility into system health via external monitoring; **Absolute Sanitization**: Environment is cleaned regardless of Python process state; **Unified ETL**: Data movement from raw ingestion to final transformation is managed under a single orchestration logic. |
+| **Cons** | Increased reliance on external infrastructure (Supabase) for monitoring; slightly more complex deployment (requires crontab and shell script management). |
+
+---
+
+### ADR-020: Config-Driven ETL Triggering Mechanism
+
+| Field | Value |
+|---|---|
+| **Status** | Approved |
+| **Date** | 2026-09-15 |
+
+#### 1. Background
+
+As the system moves from raw data ingestion (ODS) to quantitative analysis (BDI/DMT), a mechanism is needed to trigger Oracle PL/SQL stored procedures. There was a risk of over-engineering this layer by creating a complex class hierarchy (similar to the Scraper Factory) or hardcoding procedure calls within the Python orchestration logic.
+
+#### 2. Decision
+
+**ADR-020.1: Service-Based Trigger (Non-Factory)**
+- Implement a single `DbTransformer` service class. Unlike scrapers, transformation logic is uniform (calling a procedure by name); therefore, a Factory pattern is rejected in favor of a simple parameter-driven service.
+- The `DbTransformer` acts as a "remote control," utilizing the existing `DbOperator` connection pool to execute `cursor.callproc()`.
+
+**ADR-020.2: Mapping-Driven Orchestration**
+- All transformation triggers are decoupled from code and moved to `config.yaml`.
+- **Global Pipeline**: A defined sequence of procedures for full-system ETL.
+- **Task-Post-Actions**: A mapping between specific scrapers and the procedures they should trigger upon completion.
+- **Maintenance Mapping**: A mapping between system maintenance actions (e.g., `cleanup_old_data`) and their corresponding PL/SQL procedures.
+
+**ADR-020.3: Multi-Entry CLI Routing**
+- Expand `main.py` to support sub-commands (`scrape`, `transform`, `maintain`).
+- This allows the system to run full pipelines, specific transformations, or isolated maintenance tasks (e.g., weekend cleanup) without triggering the entire scraping engine.
+
+#### 3. Consequences
+
+| Description |
+|---|
+| **Pros** | **Zero-Code Updates**: New ETL steps or maintenance tasks can be added via YAML updates. **Memory Efficiency**: Maintains a flat RAM profile by keeping all logic in PL/SQL. **Operational Flexibility**: Supports both automated pipelines and manual targeted triggers. |
+| **Cons** | Requires strict naming conventions for PL/SQL procedures to ensure YAML mappings remain intuitive. |
+
+---
+
 ## 4. Implementation Progress (Current State)
 
 ### Foundation & Scraper Layer (Certified)
-
 - **Configuration**: Implemented `src/config.py` with dual-file loading per ADR-006
 - **Database Operator**: Implemented `src/db_operator.py` as a Pure-INSERT engine per ADR-005
 - **Scraper Framework**: Implemented `src/base_scraper.py` and all 6 target scrapers, verified via Truth-Based Tests per ADR-017
@@ -587,41 +671,39 @@ With the Foundation Layer and Scraper Layer certified, the system requires a cen
 - **Backup & Upload**: Implemented `BackupManager` and `UploadManager` for decoupled cloud sync per ADR-014
 
 ### Orchestration Layer (In Progress)
-
 - **Service Components**: Implemented and unit-tested `StartupHealthChecker`, `AlertManager`, and `ScraperFactory` per ADR-018
+- **Pipeline Integration**: Developing `main.py` to integrate all certified components into a production-ready pipeline.
 
 ### Current Focus
+**Integration & Shielding Phase**: Transitioning from pure Python orchestration to a Shell-wrapped pipeline for absolute resource sanitization.
 
-**Integration Phase**: Developing `main.py` to integrate all certified components into a production-ready pipeline.
-
-| Component | Status |
-|---|---|
-| `main.py` core orchestration | Pending |
-| Global `try...finally` process shielding | Pending |
-| CLI interface (argparse) | Pending |
+| Component | Status | Reference |
+|---|---|---|
+| `main.py` core orchestration | Pending | ADR-018 |
+| `run_task.sh` Master Shell | Pending | ADR-019 |
+| `cleanup_vm.sh` Resource Shield | Pending | ADR-019 |
+| CLI interface (argparse) | Pending | ADR-018 |
 
 ---
 
 ## 5. Future Actions & Planned Improvements
 
 ### Priority Items
-
 | Item | Status | Reference |
 |---|---|---|
-| **Production Deployment**: Deploy to OCI Micro VM and verify 1GB RAM stability under full-market load (~2,000 symbols) | Planned | ADR-017 |
+| **Production Deployment**: Deploy to OCI Micro VM and verify 1GB RAM stability under full-market load | Planned | ADR-017 |
+| **ETL Transformation**: Implement `DbTransformer` to trigger Oracle Stored Procedures | Planned | ADR-019 |
+| **External Monitoring**: Deploy Supabase Heartbeat (Dead Man's Switch) | Planned | ADR-019 |
+| **VM Automation**: Configure `crontab` for daily reboot and task scheduling | Planned | ADR-004 / ADR-019 |
 | **PL/SQL Engine**: Implement the "Thick-Core" analytics (EMA, PSAR, Supertrend) | Planned | Roadmap Phase 4 |
-| **Alert Calibration**: Fine-tune Pushover thresholds based on real-world noise patterns | Planned | ADR-018.3 |
-| **Crontab Scheduling**: Configure AEST pre-market (15:25) and post-market (16:45) schedules | Planned | ADR-004 |
 | **Memory Stress Test**: Execute full ingestion cycles and monitor peak memory via htop | Planned | ADR-017 |
 
 ### Completed Items (Moved from Future)
-
 - **Simplified db_operator.py**: Rewritten per ADR-005, removed MERGE INTO logic, stripped OCI backup code, consolidated audit injection
 - **ODS DDL Scripts**: Created `install_equity_schema.sql` for all ODS tables per ADR-007 data model
-- **Selenium Process Management**: Defined in ADR-018.5, to be implemented via global `finally` block in `main.py`
+- **Architectural Pivot**: Moved process shielding from `main.py` `finally` block to external Master Shell for higher reliability | ADR-019 |
 
 ### Long-Term Roadmap
-
 - **Phase 4: Thick-Core PL/SQL Analytics Engine**
   - ODS Cleaning & Deduplication Procedures
   - Technical Indicator Calculation (EMA, PSAR, Supertrend)

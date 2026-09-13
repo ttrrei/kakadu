@@ -62,9 +62,14 @@ class BaseScraper(ABC):
         if self._driver is None: self._driver = self._create_driver()
         return self._driver
 
-    def run(self, job_name: str = ""):
+    def run(self, job_name: str = "", batch_id: str | None = None):
         """
         Main execution entry point.
+        
+        Args:
+            job_name: Human-readable name of the job.
+            batch_id: The unique system batch ID (from SYS_BATCH_LOG). 
+                      If None, the system will fallback to job_name or generate a UUID.
         """
         try:
             if not self.target_table:
@@ -72,9 +77,9 @@ class BaseScraper(ABC):
 
             logger.info(f"Starting job {job_name} on table {self.target_table}...")
             if self.is_bulk_task:
-                self._run_bulk(job_name)
+                self._run_bulk(job_name, batch_id)
             else:
-                self._run_iterative(job_name)
+                self._run_iterative(job_name, batch_id)
             logger.info(f"Job {job_name} completed successfully.")
         except Exception as e:
             logger.error(f"Critical failure in job {job_name}: {e}")
@@ -101,17 +106,18 @@ class BaseScraper(ABC):
         provider = SymbolProvider(source_table=symbol_source)
         return provider.get_target_symbols()
 
-    def _run_bulk(self, job_name: str):
+    def _run_bulk(self, job_name: str, batch_id: str | None = None):
         logger.info("Executing in BULK mode...")
         driver = self.get_driver()
         data = self.scrape_all(driver, []) 
         if data:
             self.backup_manager.save_record(self.target_table, "BULK_EXPORT", data)
-            self.db.insert_batch(self.target_table, data, batch_id=job_name)
+            # Use batch_id if provided, otherwise fallback to job_name
+            self.db.insert_batch(self.target_table, data, batch_id=batch_id or job_name)
         else:
             logger.warning("No data extracted in bulk mode.")
 
-    def _run_iterative(self, job_name: str):
+    def _run_iterative(self, job_name: str, batch_id: str | None = None):
         """
         Optimized Iterative Mode with ThreadPoolExecutor and DB Buffering.
         """
@@ -144,7 +150,8 @@ class BaseScraper(ABC):
                         
                         # Flush to DB when buffer reaches batch_size
                         if len(buffer) >= self.batch_size:
-                            self.db.insert_batch(self.target_table, buffer, batch_id=job_name)
+                            # Use batch_id if provided, otherwise fallback to job_name
+                            self.db.insert_batch(self.target_table, buffer, batch_id=batch_id or job_name)
                             buffer = [] # Create new list to avoid reference issues
                 except Exception as e:
                     logger.error(f"Failed to process symbol {symbol}: {e}")
@@ -152,7 +159,8 @@ class BaseScraper(ABC):
 
         # Final flush for remaining records
         if buffer:
-            self.db.insert_batch(self.target_table, buffer, batch_id=job_name)
+            # Use batch_id if provided, otherwise fallback to job_name
+            self.db.insert_batch(self.target_table, buffer, batch_id=batch_id or job_name)
 
         logger.info(f"Iterative run finished. Success: {success_count}, Failed: {fail_count}")
 
