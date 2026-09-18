@@ -48,3 +48,30 @@
 - [ ] Implement `DbTransformer` for Oracle Stored Procedure execution.
 - [ ] Set up VM-level automation (Crontab reboot & task scheduling).
 - [ ] Deploy Supabase Heartbeat monitoring (Dead Man's Switch).
+
+
+
+----- This is additional part -----
+## Phase 3 Supplement: ETL & Audit Refined Design (Decision Log)
+
+**1. Unified ETL Triggering (Group-Based)**
+- **Mechanism**: Abandon separate "post-job" and "independent" categories. Use a single `etl_groups` mapping in `config.yaml`.
+- **Naming Convention**: 
+  - Automatic triggers: `post_{scraper_name}` (e.g., `post_price_ohlcv_pre`).
+  - Manual/Maintenance groups: Descriptive names (e.g., `full_pipeline`, `daily_maintenance`).
+- **Execution**: `DbTransformer.trigger_group(group_name)` iterates through the SP list and executes `cursor.callproc()`.
+
+**2. Audit Lineage (BATCH_ID Flow)**
+- **Ownership**: `main.py` is the single source of truth for `BATCH_ID` generation (`uuid.uuid4().hex`).
+- **Flow**: `main.py` $\rightarrow$ `SYS_BATCH_LOG` $\rightarrow$ `Scraper` $\rightarrow$ `DbOperator` $\rightarrow$ `ODS Tables`.
+- **Constraint**: No changes to `BaseScraper` or `DbOperator` logic are required if the current `batch_id` passing mechanism is functional.
+
+**3. Minimalist Implementation Strategy**
+- **No-Refactor Policy**: Avoid large-scale refactoring of `BaseScraper` or `DbOperator` unless a bug is found.
+- **Layering**: Accept the hardcoded `'ODS'` label in `SYS_BATCH_LOG` for now to avoid DB schema changes; distinguish task types via `PIPELINE_NAME`.
+- **Config-Driven**: Leverage `ConfigManager`'s dynamic dictionary loading to add `etl_groups` without modifying `config.py`.
+
+**Next Immediate Action**: 
+1. Update `config.yaml` with `etl_groups`.
+2. Implement `src/services/db_transformer.py`.
+3. Integrate `DbTransformer` into `main.py` CLI and post-scrape hooks.
