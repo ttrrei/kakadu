@@ -112,3 +112,16 @@ alerting:
   # Tier 2: Pushover Notification (External)
   notification_level: "tier_2" 
   retry_limit: 3
+
+etl_groups:
+  # 场景 1: 验证顺序执行 (A -> B)
+  test_success_group:
+    - "EQUITY.SP_TEST_STEP_A"
+    - "EQUITY.SP_TEST_STEP_B"
+  
+  # 场景 2: 验证错误截断 (A -> FAIL -> B)
+  # 预期结果：A 执行成功，FAIL 报错，B 绝对不能被执行
+  test_fail_group:
+    - "EQUITY.SP_TEST_STEP_A"
+    - "EQUITY.SP_TEST_FAIL"
+    - "EQUITY.SP_TEST_STEP_B"

@@ -65,6 +65,46 @@ class DbOperator:
         return self._get_pool().acquire()
 
     # =========================================================================
+    # Transformation Trigger Methods (ADR-020 / ADR-021)
+    # =========================================================================
+
+    def call_procedure(self, proc_name: str, params: list = None) -> None:
+        """
+        Executes a PL/SQL stored procedure.
+        
+        Args:
+            proc_name: The full name of the procedure (e.g., 'EQUITY.SP_CLEAN_ODS').
+            params: A list of parameters to pass to the procedure. Defaults to None.
+        
+        Raises:
+            oracledb.Error: If the procedure execution fails.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            # Log the attempt for auditability
+            logger.info(f"Executing PL/SQL Procedure: {proc_name} | Params: {params}")
+            
+            # callproc is the standard method for executing stored procedures in python-oracledb
+            cursor.callproc(proc_name, params or [])
+            
+            # Explicit commit to ensure the transformation is persisted
+            conn.commit()
+            logger.info(f"Successfully executed procedure: {proc_name}")
+            
+        except oracledb.Error as exc:
+            conn.rollback()
+            logger.error(f"Database error occurred while executing {proc_name}: {exc}")
+            raise
+        except Exception as exc:
+            conn.rollback()
+            logger.error(f"Unexpected error occurred while executing {proc_name}: {exc}")
+            raise
+        finally:
+            cursor.close()
+            self._pool.release(conn)
+
+    # =========================================================================
     # Batch Logging Methods (Minimalist Version)
     # =========================================================================
 
