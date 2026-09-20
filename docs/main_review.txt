@@ -1,0 +1,329 @@
+Analysis of the Three Versions
+1. 
+main_pre_nemo.py
+This is the most detailed and complete version, closely aligned with the latest ADRs and the project's documented state.
+
+Strengths:
+
+Full ADR Compliance: Explicitly implements ADR-018 (Service-Oriented Orchestration), ADR-019 (Master Shell Pattern concept via internal orchestration), ADR-020 (Config-Driven ETL), and ADR-021 (Decoupling BATCH_ID from PL/SQL).
+Robust Audit Trail: Properly implements the SYS_BATCH_LOG pattern with 
+create_batch_record
+ and 
+update_batch_status
+, using task_name as source_system (which encodes session type per ADR-010 consolidation).
+Clear Separation of Concerns: Uses singleton services (alert_manager, db_transformer) correctly instantiated at module level.
+Graceful Error Handling:
+Tier 1 alerts for local/cloud mismatches (logged, backup retained).
+Tier 2 alerts for systemic failures (Pushover).
+Cloud sync failures are non-fatal (logged as warning, pipeline continues).
+Health check failures trigger Tier 2 alerts and halt execution.
+Config-Driven:
+Uses config.get() for YAML access.
+Reads log_level, backup_dir from config.
+OCI PAR URL resolution checks both YAML and .env (via config.env.oci.config_path).
+CLI Structure:
+Three sub-commands: scrape, transform, 
+maintain
+.
+scrape uses --task (which includes session type, e.g., price_ohlcv_pre), eliminating the need for --session-type (consistent with ADR-010).
+Global --skip-health-check flag.
+Initialization Order:
+Health check → Scraper execution → Cloud sync → Post-action ETL → Audit update.
+Matches the documented flow in 
+temp_note.md
+ and ADR-019.
+Logging: Uses standard library logging with configurable level and optional file output.
+Weaknesses:
+
+Slightly more verbose, but this is justified by the need for robustness in a 1GB RAM environment.
+The finally block for driver cleanup is correctly placed in 
+BaseScraper.run()
+ (per ADR-018.5 and ADR-003), so no duplication is needed here.
+Verdict: This version is production-ready and reflects the "Current Focus" state described in 
+ACTION_LOG.md
+ (Orchestration Layer In Progress, moving toward Shell-wrapped pipeline). It integrates all certified components and adheres strictly to the approved ADRs.
+
+2. 
+main_pre_gemma.py
+A simplified version that reduces abstraction but loses some critical enterprise features.
+
+Strengths:
+
+Simpler to read and understand.
+Correctly uses 
+get_scraper
+ from 
+factory.py
+.
+Implements basic audit trail (
+create_batch_record
+, 
+update_batch_status
+).
+Attempts to trigger post-scrape ETL via post_{task_name} group.
+Weaknesses:
+
+Missing Health Check Integration: Does not call 
+StartupHealthChecker.run()
+ unless --skip-health-check is not used — but the health check logic is not actually invoked in the main flow. The 
+run_health_check()
+ function is defined but only called conditionally, and even then, it lacks the Pushover alert on failure (a key part of ADR-018.2).
+Incomplete Cloud Sync Logic:
+Attempts to read OCI PAR URL from config.env.oci.bucket_name (incorrect — this should be the bucket name, not a PAR URL).
+Falls back to config.get("system", {}).get("oci_par_url") — this part is correct, but the primary source is wrong.
+No warning log if cloud sync is skipped due to missing config (unlike 
+main_pre_nemo.py
+).
+No AlertManager Integration:
+Uses alert_manager.send_tier2_alert on failure, but the alert_manager singleton is imported and instantiated — however, there is no Tier 1 warning logic for mismatches.
+No integration with 
+BackupManager
+ for local persistence verification (though this may be handled in 
+BaseScraper
+).
+ETL Triggering:
+Calls db_transformer.trigger_group(post_group) but does not handle exceptions in a way that halts the pipeline and triggers Tier 2 alerts (it does sys.exit(1), but without logging the full traceback or ensuring audit status is updated before exit).
+Logging: Uses basic config but does not allow file logging via config (unlike 
+main_pre_nemo.py
+).
+Verdict: This version is incomplete and risky for production. It omits critical safety layers (health check alerting, proper config resolution, Tier 1/2 alerting distinction) and does not fully implement the orchestration patterns defined in ADR-018 through ADR-021.
+
+3. 
+main_pre_gemini.py
+A middle ground — cleaner than 
+main_pre_nemo.py
+ but more complete than 
+main_pre_gemma.py
+. However, it has several deviations from the documented architecture.
+
+Strengths:
+
+Clean, readable structure.
+Properly imports and uses 
+StartupHealthChecker
+, 
+AlertManager
+, 
+ScraperFactory
+, 
+DbOperator
+, 
+DbTransformer
+.
+Implements the three sub-commands (scrape, transform, 
+maintain
+) with --skip-health-check, --skip-cloud-sync, --skip-etl flags (useful for debugging).
+Correctly uses task_name (which includes session type) for audit context.
+Cloud sync logic correctly resolves OCI PAR URL from YAML or environment (using config.get("oci", {}).get("par_url") and fallback to constructing from bucket_namespace/bucket_name).
+Post-action ETL triggering via post_{task_name} group is present and conditional.
+Weaknesses:
+
+Incorrect OCI PAR URL Source:
+Uses config.get("oci", {}).get("par_url") — but in the provided 
+config.py
+, there is no such nested structure. The OCI config is under config.env.oci, not a top-level oci key in YAML.
+The correct path (as seen in 
+main_pre_nemo.py
+) is to check YAML under system.oci_par_url and .env via config.env.oci.config_path.
+This will likely return None in practice, causing cloud sync to be silently skipped.
+Health Check Alerting:
+Calls 
+run_health_probe()
+ which instantiates 
+StartupHealthChecker
+ and calls .run().
+On failure, it logs critically and calls alert_manager.send_tier2_alert — this is correct.
+However, the 
+StartupHealthChecker
+ class in 
+health_checker.py
+ does not currently send alerts on failure — it only raises RuntimeError. The alerting must be done by the orchestrator (as 
+main_pre_gemini.py
+ does), which is acceptable, but 
+main_pre_nemo.py
+ does this more explicitly in the 
+main()
+ function.
+Missing Audit Initialization for Transform/Maintain:
+In 
+handle_transform_command
+ and 
+handle_maintain_command
+, there is no call to db_operator.create_batch_record() before triggering the ETL group. This breaks the audit lineage for non-scrape operations.
+main_pre_nemo.py
+ correctly adds this in 
+handle_transform
+ and 
+handle_maintain
+.
+No Tier 1 Warning Logic:
+There is no equivalent of alert_manager.check_tier1_mismatch() — meaning local vs DB row-count mismatches are not checked or logged as warnings.
+This violates the BRD's "High-Tolerance Anti-False-Alarm" strategy and the documented consistency verification layer.
+Logging:
+Uses basic config but does not support file logging via config.get("system", {}).get("log_file").
+Verdict: This version is better than 
+main_pre_gemma.py
+ but still incomplete for production use. It fails to correctly resolve the OCI PAR URL (a critical path for cloud backup), omits audit logging for transform/maintain operations, and lacks the Tier 1/2 alerting distinction for data consistency.
+
+Recommendation
+Use 
+main_pre_nemo.py
+ as the base for the final src/main.py file.
+
+Justification
+Architectural Fidelity:
+
+It is the only version that fully implements the orchestration patterns described in ADR-018 through ADR-021.
+It correctly models the service-oriented architecture: 
+StartupHealthChecker
+, 
+AlertManager
+, 
+ScraperFactory
+, 
+DbOperator
+, 
+DbTransformer
+ are used as intended — as composable services, not base classes.
+Production Robustness:
+
+Implements the two-tier alerting system exactly as specified in BRD and ADR-018.3.
+Health check failures trigger Tier 2 alerts and halt execution (fail-fast).
+Cloud sync failures are Tier 1 warnings (logged, backup retained, pipeline continues).
+All critical paths have try/catch blocks with appropriate error propagation.
+Audit and Traceability:
+
+The SYS_BATCH_LOG integration is complete and correct:
+create_batch_record
+ on start (with task_name as source_system).
+update_batch_status
+ on success/failure.
+Applied to scrape, transform, and 
+maintain
+ commands.
+BATCH_ID is generated once per job and passed through the pipeline (per ADR-021, not passed to PL/SQL).
+Configuration Correctness:
+
+Properly reads non-sensitive config from YAML (config.get()).
+Properly reads sensitive config from .env via config.env (loaded by 
+ConfigManager
+ using python-dotenv).
+OCI PAR URL resolution checks both YAML (system.oci_par_url) and .env (config.env.oci.config_path), which matches the dual-file strategy in ADR-006.
+Alignment with Documentation:
+
+Matches the flow described in 
+temp_note.md
+ Phase 1: "Finalize src/main.py (Batch ID integration, Tier 1 check, Cloud Sync)."
+Reflects the "Current Focus" in 
+ACTION_LOG.md
+: Orchestration Layer In Progress, moving toward a Shell-wrapped pipeline.
+Does not re-implement logic that belongs in other layers (e.g., driver cleanup is in 
+BaseScraper
+, symbol validation in 
+SymbolProvider
+, etc.).
+Minimal Violations of Thin-Edge Principle:
+
+The Python layer remains focused on orchestration, data transport, and error handling.
+All heavy lifting (cleaning, deduplication, indicator calculation) is deferred to PL/SQL via 
+DbTransformer
+.
+No in-memory symbol lists — relies on 
+SymbolProvider
+ generator.
+Small-batch inserts via 
+DbOperator
+.
+Suggested Next Steps
+Copy 
+main_pre_nemo.py
+ to src/main.py.
+Verify that all imported modules exist and are correctly implemented (they are, based on the provided snippets).
+Ensure config.yaml and .env.example are present in the config/ directory with appropriate structure:
+
+Apply
+# config/config.yaml
+system:
+  backup_dir: /home/ubuntu/backup
+  log_file: /home/ubuntu/logs/kakadu.log
+  log_level: INFO
+  oci_par_url: https://objectstorage.<namespace>.oraclecloud.com/p/<bucket-name>  # optional
+etl_groups:
+  full_pipeline:
+    - EQUITY.SP_CLEAN_ODS_PRICE_OHLCV
+    - EQUITY.SP_COMPUTE_EMA
+  post_price_ohlcv_pre:
+    - EQUITY.SP_CLEAN_ODS_PRICE_OHLCV
+Prepare .env (not committed) with:
+
+Apply
+ORACLE_WALLET_PATH=/home/ubuntu/wallet
+ORACLE_WALLET_PASSWORD=your_wallet_password
+ORACLE_TNS_ALIAS=equitydb_tp
+ORACLE_USER=equity
+ORACLE_PASSWORD=your_db_password
+PUSHOVER_USER_KEY=your_pushover_user_key
+PUSHOVER_API_TOKEN=your_pushover_api_token
+OCI_CONFIG_PATH=https://objectstorage.<namespace>.oraclecloud.com/p/<bucket-name>  # if not in YAML
+LOG_LEVEL=INFO
+Run a health check to validate:
+Run
+python -m src.main scrape --task price_ohlcv_pre --skip-health-check  # for testing
+python -m src.main scrape --task price_ohlcv_pre                   # with health check
+Final Note
+While 
+main_pre_nemo.py
+ is the best choice, the long-term goal (per ADR-019) is to wrap this in a 
+run_task.sh
+ master shell script for absolute process shielding (including pre/post cleanup_vm.sh and handling of OOM/kill signals). However, for the current phase — completing the Python orchestration layer — 
+main_pre_nemo.py
+ is the correct, complete, and production-ready implementation.
+
+Let me know if you'd like me to generate the final src/main.py file based on this analysis, or if you need help reviewing the config.yaml structure or 
+run_task.sh  next.
+
+------------------------------------
+
+下面从系统约束（1GB RAM / Master Shell 包装器）、数据审计（ADR-005/020/021）、容错与退出码控制（ADR-018/019）三个核心维度进行深度对比分析：
+
+一、 三个版本的关键差异与评审结果
+| 评估维度 | 
+main_pre_nemo.py
+ (最优) | 
+main_pre_gemma.py
+ (偏简陋) | 
+main_pre_gemini.py
+ (存在严重逻辑缺陷) | | :--- | :--- | :--- | :--- | | 进程控制与退出码 (ADR-019) | 最佳：所有 Handler 均返回整型状态码 (return 0 / return 1)，并在顶层捕获 KeyboardInterrupt (130)，对 
+run_task.sh
+ 脚本的 $? 判断极其友好。 | 较差：在各个子函数内散落硬编码的 sys.exit(1)，破坏了调用栈，不利于异常冒泡和单元测试。 | 较差：同样散落 sys.exit(1)。 | | 批次状态生命周期 (ADR-005 / SYS_BATCH_LOG) | 严谨正确：1. 创建 RUNNING2. 爬取3. 云备份4. 执行 Post-ETL5. 全部成功后才更新为 SUCCESS。 | 基本正确：流程顺序一致，但未记录 transform 和 
+maintain
+ 的审计批次。 | 严重时序 Bug：在爬取完成后立即更新批次为 SUCCESS，随后才执行云备份与 Post-ETL。如果 Post-ETL 失败，批次状态已被污染为 SUCCESS，审计血缘断裂。 | | 全量运维任务审计 | 完整：对 scrape、transform、
+maintain
+ 三个子命令全部生成 UUID 批次并登记 SYS_BATCH_LOG。 | 缺失：仅对 scrape 记录批次，transform 裸奔。 | 缺失：仅对 scrape 记录批次。 | | OCI PAR URL 解析逻辑 | 稳健：将 PAR URL 视为不可篡改的凭证链接（从 YAML 或 Env 获取完整 URL）。 | 一般：尝试从 bucket_name 获取。 | 逻辑错误：试图用 bucket_name 拼接 PAR URL。实际上 PAR 是 OCI 生成的带有鉴权 token 的特定哈希路径，无法通过 bucket 名直接拼出。 | | 日志生产规范 | 完善：同时输出 Stdout 和本地日志文件（读取 config.yaml 中的 system.log_file），适合 Crontab 无人值守环境。 | 仅控制台 StreamHandler。 | 仅控制台 StreamHandler。 |
+
+二、 为什么选择 
+main_pre_nemo.py
+？
+符合 Master Shell (ADR-019) 契约： 在 1GB RAM VM 环境下，外部是通过 
+run_task.sh
+ 调度（执行 cleanup -> main.py -> cleanup）。nemo 版在 
+main()
+ 统一聚合 exit_code，捕获异常后触发 Tier 2 Pushover 报警并返回退出码 1，让外层 Shell 能够精确感知成败并触发后置清理或 Supabase Heartbeat。
+Post-Action ETL 强一致性： nemo 将 
+_trigger_etl_group(post_group)
+ 放在标记 SUCCESS 之前，一旦 PL/SQL 过程报错，整个批次置为 FAILED 并触发 Pushover，保证了 ODS 落地与 BDI 转换在审计上的完整闭环。
+架构解耦度高： 显式注入 scraper = scraper_cls(db_op=db_operator)，与工厂模式和底层依赖完美贴合。
+三、 对 
+main_pre_nemo.py
+ 的微调建议（落地前的最后优化）
+main_pre_nemo.py
+ 已经具备 95% 以上的生产完成度，建议在最终采纳为 src/main.py 时加入以下两点微调：
+
+OCI PAR URL 字段对齐： 检查 
+config.py
+ 中的 
+OCIConfig
+，目前类定义中包含 config_path、bucket_namespace、bucket_name。如果在 .env 里存的是 PAR 完整 URL，请确保统一从 config.env.oci.config_path 或 config.get("system", {}).get("oci_par_url") 读取，保持两处命名完全一致。
+显式关闭 DB 连接池： 在 
+main()
+ 的最外层或 sys.exit 前，增加一个轻量级的连接池释放防护（如 db_operator.close()），防止进程退出时连接悬挂。
