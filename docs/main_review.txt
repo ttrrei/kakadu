@@ -1,735 +1,190 @@
-审计失败被吞掉，可能产生“业务成功但没有审计记录”的静默失败
+P0：数据库写入失败仍可能被标记为 SUCCESS
+虽然审计写入失败已经会抛异常，但数据插入方法 insert_batch() 仍会吞掉整体插入错误：
 
-Nemo 对 create_batch_record() 的异常只记日志并继续抓取。
+except Exception as exc:
+    conn.rollback()
+    logger.error(...)
+然后仍返回 effective_batch_id。 
 
-更严重的是，底层 DbOperator.create_batch_record() 在 Oracle 错误时 rollback 并记录日志，但不重新抛出异常，也不返回失败标志。update_batch_status() 也是同样的行为。
+单条 fallback 插入失败时也只是记录“Dropped record”，没有返回实际成功数或失败数。 
 
-这会造成：
+而 BaseScraper 的 success_count 统计的是“scrape_one() 返回了数据”，不是“数据实际成功写入 Oracle”的条数。 
 
-RUNNING 插入失败；
+这可能造成以下情况：
 
-Nemo 继续执行 scraper、上传和 ETL；
+API 成功抓到 100 条记录；
 
-SUCCESS 更新也可能失败但被吞掉；
+本地备份也写成功；
 
-主程序仍返回 0。
+Oracle 因字段、连接或 SQL 错误而一条未写入；
 
-这直接违背了你文档中的“零静默失败”和严格批次生命周期要求。
+insert_batch() 吞掉错误；
 
-建议：
+success_count > 0；
 
-将 create_batch_record() 与 update_batch_status() 改成：成功返回 None/True，数据库异常必须向上抛出。
+main_v3_gemini.py 最终写 SUCCESS。
 
-create_batch_record() 失败应立即终止任务并触发 Tier 2；否则没有可靠的批次血缘。
+这意味着此前的“本地备份 vs DB 写入计数”的 P0 问题尚未真正修复。
 
-FAILED 状态写入失败时，应记录 CRITICAL，并让外部 Shell / heartbeat 能观察到非零退出码。
+推荐修复方式
+不要让 insert_batch() 仅返回 batch_id；应返回显式结果，例如：
 
-可考虑给 SYS_BATCH_LOG.BATCH_ID 加唯一约束，避免重复 batch id 导致更新多行或审计歧义。
-这是一段非常深刻、直击系统可靠性核心的评审意见。
+@dataclass(frozen=True)
+class InsertResult:
+    attempted_count: int
+    inserted_count: int
+    dropped_count: int
+然后 BaseScraper.run() 汇总并返回：
 
-我们直接针对这条评审的每一个论点，对照你的设计文档（SAD、BRD、ADR-005、ADR-018、
-MAIN_ORCHESTRATOR_REVIEW_GUIDELINES.md
-）进行客观校验与定性分析：
+@dataclass(frozen=True)
+class RunReport:
+    target_table: str
+    extracted_count: int
+    backed_up_count: int
+    insert_result: InsertResult
+    failed_symbol_count: int
+    backup_path: str
+最后在 main 中：
 
-一、 校验结论汇总：“完全属实，切中要害，必须修改，绝非过度工程”
-| 提出的论点 | 定性判定 | 理由简述 | | :--- | :--- | :--- | | 1. 审计异常在底层被吞掉，导致“业务跑完但零审计” | 完全属实 | 
-db_operator.py
- 中 
-create_batch_record
- 与 
-update_batch_status
- 内部写了 except oracledb.Error: logger.error(...) 且未 raise，外部根本感知不到异常。 | | 2. 违背“零静默失败”与严格批次生命周期契约 | 完全属实 | 如果连 RUNNING 都写不进去，后面的批次血缘就是空中楼阁，破坏了 ADR-005 的端到端追踪原则。 | | 3. 
-create_batch_record()
- 失败应立即终止并报 Tier 2 | 必须采纳 (P0) | 数据库既然连一条日志都插不进（通常是连接池耗尽、表锁死或表结构问题），后续业务极大概率也无法正常完成，理应“Fail Fast”。 | | 4. 
-update_batch_status()
- 异常应向外冒泡并在最终退出码体现 | 必须采纳 (P0) | 如果状态无法更新为 SUCCESS，外部 Shell 和外部 Heartbeat 绝不能当成“任务正常结束”，否则会导致监控盲区。 | | 5. SYS_BATCH_LOG.BATCH_ID 唯一约束 | 合理建议 (P1) | DDL 层面通常已有 Primary Key 或 Unique 约束；如果尚未加，必须确保存在。但在 Python 侧生成的是 UUID v4，碰撞几率几乎为零。 |
+inserted_count == 0 且 extracted_count > 0：Tier 2 + FAILED；
 
-二、 深度事实查证：代码现状还原
-我们看一下你当前贴出的 src/db_operator.py 中的真实代码：
+inserted_count != backed_up_count：调用 check_tier1_mismatch()；
 
+只有关键条件满足时才进入 Post-ETL 和 SUCCESS。
 
-Apply
-# src/db_operator.py 现状：
-def create_batch_record(self, batch_id: str, task_name: str, source_system: str = "INTERNAL") -> None:
-    ...
-    try:
-        cursor.execute(sql, batch_id=batch_id, pipeline=task_name, source=source_system)
-        conn.commit()
-    except oracledb.Error as exc:
-        conn.rollback()
-        logger.error(f"Failed to create batch record in SYS_BATCH_LOG: {exc}") # <--- 吞掉了！没有 raise
-    finally:
-        cursor.close()
-        self._pool.release(conn)
-再看 
-main_v2_nemo.py
-：
+目前 AlertManager 已经具备 Tier 1 mismatch 函数，但 Gemini/Nemo 都未调用它。 
 
+P1：云同步配置语义仍不一致
+当前 config 使用：
 
-Apply
-# main_v2_nemo.py 现状：
-try:
-    db_operator.create_batch_record(batch_id=batch_id, task_name=task_name, source_system=task_name)
-except Exception as e:
-    # 标注为 Non-fatal，即使抛出也被这里吞掉并忽略！
-    logger.error(f"Failed to create batch audit record (Non-fatal): {e}")
-后果分析：
+oci:
+  enabled: true
 
-假性健康：当 Oracle 发生锁争用、表空间不足、或者权限异常时，SYS_BATCH_LOG 写入失败。
-血缘断裂：虽然 ODS 记录中包含了由 Python 生成的 BATCH_ID，但是在 SYS_BATCH_LOG 中根本查不到这个批次！下游的 PL/SQL 增量计算存储过程如果依赖 SYS_BATCH_LOG 来判断数据新旧，将导致整个 ETL 链条停滞。
-静默成功：最致命的是，Scraper 抓了数据，DB 更新状态失败被忽略，Post-ETL 执行完，主程序向外部 Shell 返回退出码 0！外部监控以为一切安好，但审计库里空空如也。这彻底违背了 ADR-018.2 的 “Anti-Silent Failure”（零静默失败） 和 ADR-019 的 “Fail Fast” 红线。
-三、 为什么这“绝不是过度工程”？
-有的工程师可能会问：“审计日志只是一种辅助，为了审计日志失败把整个抓取任务停掉，算不算过度工程？”
+但 Gemini/Nemo 不读取该字段；它们只读取：
 
-在 Kakadu 架构下，这绝非过度工程，而是核心支柱：
+system.oci_par_url
 
-这是量化系统，不是简单的爬虫玩物：Kakadu 的核心契约是《系统架构设计 (SAD)》和《DoD 验收标准》中的 “Idempotency & Auditability（幂等与可追溯性）”。无审计的脏数据一旦混入 ODS，后续 PL/SQL 根本无法回溯。
-连环故障预警：
-create_batch_record
- 是连接 Oracle 后的第一个写操作。如果它失败了，说明数据库要么不可写，要么网络中断，要么权限错乱。在此刻立刻 Fail Fast 退出并触发 Pushover，比让爬虫跑了 15 分钟、耗尽 VM 内存后在底层爆炸要优雅、安全得多！
-四、 必须执行的具体修改方案
-根据这个审查意见，我们需要在 src/db_operator.py 和 src/main.py 两处进行精准手术，消除吞异常的反模式：
+config.env.oci.config_path
 
-1. 修改 src/db_operator.py
-将错误向上抛出，不要在底层偷偷吞掉：
+找不到 URL 时仅记录 INFO 并返回成功。 
 
+这将导致“配置显示已启用、实际没有上传”的危险假象。
 
-Apply
-# src/db_operator.py 改造后
+推荐修复方式
+配置和代码统一成一种明确模型：
 
-    def create_batch_record(self, batch_id: str, task_name: str, source_system: str = "INTERNAL") -> None:
-        """Insert an initial 'RUNNING' record into SYS_BATCH_LOG.
-        Raises oracledb.Error / Exception on failure (Fail Fast).
-        """
-        sql = """
-            INSERT INTO EQUITY.SYS_BATCH_LOG 
-            (BATCH_ID, LAYER, PIPELINE_NAME, STATUS, SOURCE_SYSTEM) 
-            VALUES (:batch_id, 'ODS', :pipeline, 'RUNNING', :source)
-        """
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute(sql, batch_id=batch_id, pipeline=task_name, source=source_system)
-            conn.commit()
-            logger.info(f"Batch record created: {batch_id} for task {task_name}")
-        except Exception as exc:
-            conn.rollback()
-            logger.error(f"Failed to create batch record in SYS_BATCH_LOG: {exc}")
-            raise  # <--- 必须向上抛出！让调度层感知
-        finally:
-            cursor.close()
-            self._pool.release(conn)
+oci:
+  enabled: true
+环境变量：
 
-    def update_batch_status(self, batch_id: str, status: str, error_message: str = None) -> None:
-        """Update the status of a batch in SYS_BATCH_LOG.
-        Raises oracledb.Error / Exception on failure.
-        """
-        sql = """
-            UPDATE EQUITY.SYS_BATCH_LOG 
-            SET STATUS = :p_status, 
-                END_TIME = SYSTIMESTAMP, 
-                ERROR_MESSAGE = :p_err 
-            WHERE BATCH_ID = :p_bid
-        """
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute(sql, p_status=status, p_err=error_message, p_bid=batch_id)
-            conn.commit()
-            logger.info(f"Batch record updated: {batch_id} -> {status}")
-        except Exception as exc:
-            conn.rollback()
-            logger.error(f"Failed to update batch status in SYS_BATCH_LOG: {exc}")
-            raise  # <--- 必须向上抛出！
-        finally:
-            cursor.close()
-            self._pool.release(conn)
-2. 修改 src/main.py（以 Nemo 版为基准）
-将审计初始化纳入主 try...except 块内，一旦 
-create_batch_record
- 失败，立刻触发 Tier 2 Pushover，并返回退出码 1：
+OCI_PAR_URL=https://objectstorage...
+配置对象：
 
+@dataclass
+class OCIConfig:
+    enabled: bool = False
+    par_url: str = ""
+调度逻辑：
 
-Apply
-# src/main.py 的 handle_scrape 改造后：
+oci.enabled	OCI_PAR_URL	行为
+false	任意	INFO：主动不启用同步。
+true	有效 URL	执行同步。
+true	缺失/非法	Tier 1 Warning；生产环境可选择拒绝启动。
+另外，建议废弃把 PAR URL 存入 OCI_CONFIG_PATH 的做法；该名字容易被理解为 OCI SDK 的 config 文件路径，而不是预认证上传 URL。
 
-def handle_scrape(task_name: str) -> int:
-    batch_id = uuid.uuid4().hex
-    logger.info(f"=== SCRAPE START | Task: {task_name} | Batch: {batch_id} ===")
+P1：上传后仍然是“成功 PUT 即清理”，没有验证后清理
+当前 UploadManager 的流程是：
 
-    try:
-        # 1. Audit Entry (RUNNING) - 必须在主 try 块内！失败直接 Fail Fast
-        db_operator.create_batch_record(
-            batch_id=batch_id, 
-            task_name=task_name, 
-            source_system=task_name
-        )
+压缩；
 
-        # 2. Factory & Execution
-        scraper_cls = ScraperFactory.get_scraper(task_name)
-        scraper = scraper_cls(db_op=db_operator)
-        target_table = scraper.target_table
+PUT；
 
-        if not target_table:
-            raise KeyError(f"Scraper '{task_name}' missing 'target_table' in config.yaml")
+raise_for_status() 成功；
 
-        logger.info(f"Executing Scraper: {scraper_cls.__name__} -> Target Table: {target_table}")
-        scraper.run(job_name=task_name, batch_id=batch_id)
+立即 clear_task_dir()。 
 
-        # 3. Cloud Sync (Post-Ingestion, 保持 Tier-1 容错，不阻断主流程)
-        _sync_cloud_backup(target_table)
+但设计要求是：上传和验证后，才清理本地文件。 
 
-        # 4. Post-Action ETL
-        post_group = f"post_{task_name}"
-        etl_groups = config.get("etl_groups", {})
-        if post_group in etl_groups:
-            _trigger_etl_group(post_group)
-        else:
-            logger.info(f"No post-action ETL group defined for '{post_group}'. Skipping.")
+推荐修复方式
+建议采用 batch 级别的备份对象，而不是“table + day”级别：
 
-        # 5. Audit Success (包含此步！如果 update 失败，冒泡到 except 记录 FAILED 并报警)
-        db_operator.update_batch_status(batch_id=batch_id, status="SUCCESS")
-        logger.info(f"=== SCRAPE SUCCESS | Task: {task_name} | Batch: {batch_id} ===")
-        return 0
-
-    except Exception as e:
-        err_msg = str(e)
-        logger.error(f"=== SCRAPE FAILED | Task: {task_name} | Batch: {batch_id} | Error: {err_msg} ===")
-        
-        # 尽最大努力更新为 FAILED，如果此时 DB 彻底挂了，记录 CRITICAL
-        try:
-            db_operator.update_batch_status(batch_id=batch_id, status="FAILED", error_message=err_msg)
-        except Exception as db_err:
-            logger.critical(f"FATAL: Failed to record FAILED status to SYS_BATCH_LOG: {db_err}")
-
-        # 触发 Tier 2 Pushover 警报 (系统致命故障)
-        alert_manager.send_tier2_alert(
-            f"Kakadu Scrape Failure\nTask: {task_name}\nBatch: {batch_id}\nError: {err_msg}"
-        )
-        return 1
-同理，
-handle_transform
- 和 
-handle_maintain
- 中也将 
-create_batch_record
- 放在各自的 try 块最前面，失败则立即上报并返回 1。
-
-总结
-这条意见完全正确，是非常高质量的资深架构审查。它补齐了 Kakadu 系统中一直容易被轻视的“审计自洽性”漏洞。采纳这个修改后，
-main_v2_nemo.py
- 将达到真正无死角的生产级别。
-
-如果你需要进行代码修改，你可以随时指示切换到 Agent 模式，我来为你修改 src/db_operator.py 并生成修正后的 src/main.py。
-
-Tier 1 “本地备份 vs 数据库写入量”校验完全没有接入主流程
-
-BRD 要求单批次的本地 JSONL 行数与 DB 写入行数不一致时：仅记录 Tier 1 Warning、保留备份、不立即 Pushover。
-
-AlertManager 已有 check_tier1_mismatch() 方法。 但三个 main_v2_* 版本都没有调用它；Nemo 的云同步函数只返回成功/失败布尔值，并未取得或比对数据数量。
-
-而目前的实际备份实现也不是设计文档所写的 JSONL：它是按 symbol 覆盖式保存为单独的 .json 文件。 这与 SAD 定义的“JSON Lines + DB count 校验”不一致。
-
-建议：
-
-为每次运行定义一个稳定的 run_id / batch_id 目录，例如： backup/<target_table>/<YYYY-MM-DD>/<batch_id>.jsonl。
-
-BaseScraper.run() 返回结构化 RunReport，至少包含：
+/home/ubuntu/backup/
+  ODS_PRICE_TICK/
+    2026-09-24/
+      <batch_id>/
+        records.jsonl
+        manifest.json
+manifest.json 至少记录：
 
 batch_id
 
-target_table
-
-extracted_count
-
-backed_up_count
-
-insert_attempted_count
-
-inserted_count
-
-failed_symbol_count
-
-backup_path
-
-DbOperator.insert_batch() 返回“实际成功插入数”和“失败记录数”，不能只返回 batch id。
-
-Nemo 在 Post-ETL 前调用 check_tier1_mismatch()；若不一致，保留本地文件、记录 Warning，但依文档仍可继续主流程。
-
-连续多次 mismatch 或“空数据/大面积失败”时升级 Tier 2。
-
-
-这是一份非常具有洞察力的架构合规性评审。
-
-针对评审中提出的每一句话、每一个设计矛盾以及改动建议，我们结合项目演进史（ADRs、
-ACTION_LOG.md
-、
-system_architecture_design.md
-、BRD、代码现状）进行严格的定性与事实校验：
-
-一、 核心结论汇总表
-| 评审论点 | 校验定性 | 分析与定性理由 | | :--- | :--- | :--- | | 1. 
-check_tier1_mismatch()
- 完全没有被 
-main.py
- 调用 | 完全属实 | 代码事实：
-AlertManager.check_tier1_mismatch
- 确实是孤立的方法，在所有 
-main*.py
- 中从未被触发过。 | | 2. 实际备份实现是 .json 单文件，而非文档中的 .jsonl | 完全属实 | 代码事实：
-backup_manager.py
- 写的是 json.dump 单个 {symbol}.json，与早期 SAD 写的 .jsonl 发生实现漂移。 | | 3. 建议重构 
-BaseScraper
- 返回 RunReport、修改 
-insert_batch
- 统计行数、接入 Tier 1 | 存在部分过度工程与违反当前阶段决策的风险 | 核心冲突点：这违背了 ADR-005 的“极简不重构”决策，以及 
-temp_note.md
- 中明确冻结的“No-Refactor Policy（禁止大规模重构 BaseScraper / DbOperator）”！ |
-
-二、 逐项深度拆解：属实之处 vs 过度工程之处
-1. 属实之处：文档与代码存在“历史漂移（Drift）”
-评审人指出的两个事实100% 准确：
-
-方法闲置：
-alert_manager.py
- 里的 
-check_tier1_mismatch(local_count, db_count, ...)
- 确实孤立存在，没有任何 caller。
-格式不符：
-backup_manager.py
- 内部是：
-
-Apply
-final_path = os.path.join(task_dir, f"{symbol}.json")
-with open(temp_path, 'w', encoding='utf-8') as f:
-    json.dump(data, f, ensure_ascii=False, indent=2)
-它保存的是每只股票一个 JSON 文件，而不是把所有股票流式追加到单个 YYYY-MM-DD.jsonl 中。
-2. 为什么该建议的“解决方案”属于阶段性过度工程（Over-Engineering）？
-评审人给出的建议（重构 
-BaseScraper.run()
- 返回 RunReport、修改 
-DbOperator.insert_batch()
- 统计每批插入行数、统计 extracted_count / backed_up_count / inserted_count）：
-
-在最终完美形态的系统里，这套指标收集固然很漂亮，但在当前阶段，它严重违反了项目现有的决策红线：
-
-理由 A：严重违反 ADR-005 与 Phase 3 决策记录（No-Refactor Policy）
-请看你文档中的 
-temp_note.md
-（Phase 3 Supplement: ETL & Audit Refined Design）：
-
-“3. Minimalist Implementation Strategy: No-Refactor Policy: Avoid large-scale refactoring of BaseScraper or DbOperator unless a bug is found.” “Constraint: No changes to BaseScraper or DbOperator logic are required if the current batch_id passing mechanism is functional.”
-
-如果按照评审人的建议做：
-
-你必须修改 
-BaseScraper
-（多线程 ThreadPoolExecutor 的线程安全计数器、聚合字典）；
-你必须修改 
-DbOperator.insert_batch()
-，解析 cursor.rowcount，在 fallback 单条执行时逐条计数；
-你必须修改所有的 Extractor / Scraper 测试用例；
-这会瞬间把一个已经通过“Truth-Based Verification（真实验收）”的抓取体系全部打翻重构！在 1GB RAM 的 VM 上，越复杂的内存指标统计越容易引入线程安全和开销问题。
-理由 B：评审人误解了当前的“Tier 1”在 
-main.py
- 中的实际职责定位
-根据 ADR-014（解耦备份与上传）与 
-UploadManager
- 的设计：
-
-当前的 Tier 1 降级防御： 在 
-main.py
- 中，云备份上传失败就是 Tier 1（logger.warning + 保留本地文件，不阻断主流程，不发 Pushover）。 这在 
-main_v2_nemo.py
- 的 
-_sync_cloud_backup()
- 里已经严格做到了：
-
-Apply
-except Exception as e:
-    # Tier 1 Logic: Log warning, retain local backup, do NOT crash pipeline
-    logger.warning(f"[TIER-1] Cloud sync FAILED for {target_table} (Backup retained locally): {e}")
-    return False
-为什么不数 DB 行数与本地行数？ 因为 ODS 是 Pure-INSERT 追加写，每一行都盖了 BATCH_ID 时间戳。真正的数据一致性、去重与数量对账，属于 Thick-Core（Phase 4 PL/SQL Analytics Engine）的职责！让 Python 这种 Thin-Edge 去跨网络做 count 对账，完全违背了 Thin-Edge 的无状态极简设计。
-三、 务实、不破环现有稳定性的落地方案（Pragmatic Solution）
-面对这个审计意见，我们既不能视而不见（毕竟文档和代码有差异），也不能推翻现有架构搞大重构。正确的工程处理方式是：
-
-1. 判定定性
-指出的现象：属实（代码确实没调行数对账，且为 .json 散文件）。
-建议的重构方案：判定为当前阶段的过度工程（Over-Engineering），暂缓全面实施。
-2. 如何平滑修正？（两步走策略）
-第一步（当前阶段 - 零破坏性收敛）：
-保持 No-Refactor Policy，不动 
-BaseScraper
- 和 
-DbOperator
- 的核心接口：
-
-对齐 Tier 1 的语义认知： 在 
-main_v2_nemo.py
- 中，明确将 “云备份失败” 以及 “Scraper 抓取成功 0 计数 / 空目录” 归为当前的 Tier 1 警告。
-轻量统计本地备份数（如果真想接入 
-check_tier1_mismatch
-）： 
-BackupManager
- 存的是 task_dir 下的 .json 文件。 在 
-main.py
- 的 scraper.run() 执行完毕后，直接扫描本地 task_dir 的文件个数： 
-𝑙
-𝑜
-𝑐
-𝑎
-𝑙
-_
-𝑐
-𝑜
-𝑢
-𝑛
-𝑡
-=
-𝑙
-𝑒
-𝑛
-(
-[
-𝑓
- for 
-𝑓
- in os.listdir(task_dir) if 
-𝑓
-.
-𝑒
-𝑛
-𝑑
-𝑠
-𝑤
-𝑖
-𝑡
-ℎ
-(
-′
-.
-𝑗
-𝑠
-𝑜
-𝑛
-′
-)
-]
-)
-local_count=len([f for f in os.listdir(task_dir) if f.endswith( 
-′
- .json 
-′
- )]) 如果 $local_count == 0$，记录 Tier 1 Warning（甚至说明抓取被反爬屏蔽了，空跑）。 无需修改 BaseScraper 或 DbOperator 底层，即可在 
-main.py
- 优雅消费这个指标。
-第二步（远期 Phase 4 规划）：
-将真正的“行级对账”交给 PL/SQL： PL/SQL 在执行 SP_CLEAN_ODS 时，通过 COUNT(1) WHERE BATCH_ID = :batch_id 可以毫秒级算出入库行数并写入 SYS_BATCH_LOG.PROCESSED_ROWS。这才是纯正的 Thick-Core 哲学！
-
-四、 总结给审查意见的答复口径
-关于没调 
-check_tier1_mismatch
- 和单文件 .json：确认属实。这是项目从早期概念设计演进到 ADR-014（解耦上传为 Zip）过程中产生的历史漂移。
-关于重构 RunReport 和计数器：当前阶段拒绝大重构。根据 Phase 3 决策记录，BaseScraper 和 DbOperator 处于冻结状态（No-Refactor Policy）。行级严格一致性校验由 Phase 4 Thick-Core (Oracle PL/SQL) 处理，不在 Thin-Edge Python 侧做重内存运算。
-采纳点：在 
-main.py
- 中，对本地文件生成情况做轻量检查，保留 Tier 1 告警语义，杜绝空跑漏洞，保持系统极简与 1GB RAM 物理安全。
-
-
-当前并不满足 1GB RAM / O(1) 内存设计，且这个问题不在 main 里
-
-文档要求 generator 迭代和 O(1) 内存；HTTP/Selenium 任务需要隔离，Chrome 必须严格串行。
-
-但 BaseScraper._run_iterative() 会遍历完整 symbols_gen，为每个 symbol 一次性创建 future，并将所有 future 放进 future_to_symbol 字典。符号数达到两千时，任务队列、future 和引用都留在内存中，这不是 O(1)。
-
-同时，配置中给 price_ohlcv_pre 设置了 max_workers: 20，且 AFR、分析师任务也设置了 10 个 worker。 数据库连接池又允许最大 40 个连接。
-
-在 1GB VM 上，这组参数风险很高，即使每个单独组件看起来都“轻量”。
-
-建议：
-
-用有界 in-flight 队列，不要一次性提交所有 symbol。
-
-max_workers 应控制在 1–4，并按 scraper 类型分别设置。
-
-DbOperator 连接池建议是 min=1, max=2~4，而非 40。
-
-若 scraper 使用单一 Selenium driver，禁止多线程共享 driver；Selenium 任务应始终 max_workers=1。
-
-必须加 RSS/峰值内存监控和全市场压测，达标后再上 crontab。
-
-
-我们针对报告中提到的每一条指控和参数设置，对照你的项目代码（
-base_scraper.py
-、
-db_operator.py
-）以及 OCI Micro VM (1GB RAM) 的物理现实进行深入校验：
-
-一、 核心校验结论汇总
-| 评审论点 | 定性判定 | 理由与事实分析 | | :--- | :--- | :--- | | 1. 一次性将所有 symbol 丢入 ThreadPoolExecutor 违背了 O(1) 内存 | 100% 属实！(底层的设计逻辑漏洞) | future_to_symbol = {executor.submit(...): symbol for symbol in symbols_gen} 这一行代码会把生成器瞬间在内存中完全展开，并在堆上分配 ~2000 个 Future 对象及闭包上下文。 | | 2. 现存参数（max_workers=20, DB连接池 max=40）在 1GB RAM 下是定时炸弹 | 100% 属实！(极高 OOM 风险) | 1 个 Oracle Thin Mode 连接虽然轻，但 40 个连接 + 20 个 Python 线程栈（默认每个线程栈 8MB）+ HTTP 响应缓存，在 1GB RAM（且无重度 Swap）的 Micro VM 上瞬间打满。 | | 3. 建议：限制最大线程数（1~4）、DB 连接池降至 2~4、有界队列提交、Selenium 严格单线程 | 完全合理，必须采纳！(非过度工程，属于生产降参配置) | 这不需要写大量复杂代码，仅需几行有界迭代逻辑 + 修改 config.yaml / 
-db_operator.py
- 的参数，就能彻底消除 1GB 内存暴毙风险。 | | 4. 建议：加 RSS 内存监控与全市场压测 | 完全符合 ADR-017 (Pre-Prod Truth Test) | 项目 ADR-017 本就规定了必须在 1:1 的 Pre-Prod 1GB VM 上通过 htop 和真实验收。 |
-
-二、 深度事实查证：代码现状还原
-1. 内存伪 O(1) 漏洞（src/base_scraper.py）
-请看你贴出的真实代码：
-
-
-Apply
-# src/base_scraper.py 现状：
-def _run_iterative(self, job_name: str, batch_id: str | None = None):
-    ...
-    symbols_gen = self._get_symbol_generator()
-    buffer = []
-    
-    with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-        # 这一行字典推导式直接把整个生成器榨干（消耗殆尽）：
-        future_to_symbol = {
-            executor.submit(self._process_single_symbol, driver, symbol): symbol 
-            for symbol in symbols_gen  # <--- 一次性生成 2000 多个 Future！
-        }
-后果：
-
-SymbolProvider
- 费尽心思用 yield 做的生成器 O(1) 流式传输，在这一行被瞬间打回原形，变成全量内存驻留。
-2000 多个任务在线程池任务队列排队，每个任务持有参数引用和未完成的 Future 状态，破坏了 Thin-Edge 的内存扁平化原则。
-2. 线程与连接池参数冒进（src/db_operator.py）
-请看 src/db_operator.py：
-
-
-Apply
-# src/db_operator.py 现状：
-pool_kwargs = dict(
-    ...
-    min=1,
-    max=40,  # <--- 1GB RAM 上开了 40 个 DB 连接池上限！
-    increment=1,
-    ...
-)
-后果：
-
-OCI Micro VM (1GB RAM) 本身还要跑 Ubuntu OS、Oracle Client 网络套接字、日志系统。
-40 个连接加上 10~20 个并发工作线程，在网络稍微抖动或 DB 响应慢时，线程堆积 + 连接堆积会直接触发 Linux 内核的 OOM Killer，把 Python 进程 SIGKILL。
-三、 改造方案（极简、安全、完全符合 1GB RAM 物理防爆）
-这份建议完全不需要搞复杂的架构重构，只需要做 3 处轻量级但至关重要的优化：
-
-1. 修复 
-BaseScraper
- 中的任务提交：采用“有界并发流（Bounded In-Flight Stream）”
-不需要引入第三方库，用 Python 标准库的标准生成器推导即可将并发窗口限制在 max_workers * 2，实现真正的 $O(\text{workers})$ 内存占用：
-
-
-Apply
-# src/base_scraper.py 改造：
-def _run_iterative(self, job_name: str, batch_id: str | None = None):
-    logger.info(f"Executing in ITERATIVE mode with {self.max_workers} threads...")
-    
-    success_count = 0
-    fail_count = 0
-    driver = self.get_driver()
-    symbols_gen = self._get_symbol_generator()
-    buffer = []
-    
-    # 限制同时在内存中飞行的任务数为 workers * 2
-    max_in_flight = max(self.max_workers * 2, 4)
-
-    with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-        future_to_symbol = {}
-        
-        # 1. 预填满有界窗口
-        for symbol in symbols_gen:
-            future = executor.submit(self._process_single_symbol, driver, symbol)
-            future_to_symbol[future] = symbol
-            if len(future_to_symbol) >= max_in_flight:
-                break
-
-        # 2. 消费一个，补充一个，内存始终维持在 O(workers) 级别
-        while future_to_symbol:
-            # 等待最早完成的一个
-            for future in as_completed(future_to_symbol):
-                symbol = future_to_symbol.pop(future)
-                try:
-                    result = future.result()
-                    if result:
-                        records = result if isinstance(result, list) else [result]
-                        buffer.extend(records)
-                        success_count += 1
-                        
-                        if len(buffer) >= self.batch_size:
-                            self.db.insert_batch(self.target_table, buffer, batch_id=batch_id or job_name)
-                            buffer = []
-                except Exception as e:
-                    logger.error(f"Failed to process symbol {symbol}: {e}")
-                    fail_count += 1
-
-                # 补充新任务到线程池
-                try:
-                    next_symbol = next(symbols_gen)
-                    new_future = executor.submit(self._process_single_symbol, driver, next_symbol)
-                    future_to_symbol[new_future] = next_symbol
-                except StopIteration:
-                    pass
-                
-                # 重新计算 as_completed（保持动态循环）
-                break
-2. 参数收敛（物理安全线）
-src/db_operator.py： 将连接池参数调整为适应 1GB VM 的安全值：
-
-Apply
-pool_kwargs = dict(
-    user=self.config.database.user,
-    password=self.config.database.password,
-    dsn=self.config.database.tns_alias,
-    min=1,
-    max=5,          # 从 40 降至 5！足够应对 1~4 个 worker 并发写入
-    increment=1,
-    wallet_location=self.config.database.wallet_path,
-    config_dir=self.config.database.wallet_path,
-)
-config.yaml（各 Scraper 并发参数）：
-Lightweight API Scrapers (price_ohlcv, short): max_workers: 4
-Selenium / Headless Scrapers (annc): 强制 max_workers: 1（单实例 Chrome 串行）
-
-
-空数据和大面积 symbol 失败仍会被标记为成功
-
-Nemo 只要 scraper.run() 没有抛异常，就会继续同步、ETL，最终写 SUCCESS。
-
-但 BaseScraper 的行为是：
-
-bulk scraper 抓不到任何数据时，只写 warning，不抛异常；
-
-iterative scraper 即使所有 symbol 都失败，也只记录最终成功/失败计数后正常返回。
-
-这意味着“目标站点改版、接口全部失败、得到 0 条数据”的严重业务事故，可能在 SYS_BATCH_LOG 中被记录成 SUCCESS。而 BRD 明确规定 bulk missingness 应触发 Tier 2。
-
-建议：
-
-将 scraper.run() 改为返回 RunReport，不要只靠“是否抛异常”判断成功。
-
-在配置中为任务增加阈值，例如：
-
-afr:   min_success_count: 80   max_failure_ratio: 0.20
-
-用“预期 symbol 数、成功数、失败比例、上次成功数量的环比”判断是否为 bulk missingness。
-
-达到严重阈值时抛专用 DataCompletenessError，由 Nemo 标记 FAILED 并发送 Tier 2。
-
-这同样是一条极其致命、一针见血的业务安全审查意见。
-
-我们直接对照你现有的代码实现、BRD 规范以及架构设计原则，对这一说法进行严格的定性分析：
-
-一、 校验结论汇总
-| 评审论点 | 校验定性 | 核心判定理由 | | :--- | :--- | :--- | | 1. 0条数据 / 100% 失败时，依然会被标记为 SUCCESS | 完全属实 (致命漏洞) | 代码事实：
-BaseScraper
- 内部确实只打印 warning 或 fail_count，函数正常结束不抛错，导致 
-main.py
- 欢快地走完流程并在 SYS_BATCH_LOG 盖上 SUCCESS 印章！ | | 2. 违背 BRD 规定的“Bulk Missingness 必须触发 Tier 2 报警” | 完全属实 (高危事故隐患) | 爬虫最可怕的事故不是程序 Crash，而是静默空跑（接口改版、WAF反爬拦截返回空列表）。系统连续几天标记 SUCCESS，实际库里一条数据没进。 | | 3. 建议引入多维环比与复杂阈值（环比上周、失败率计算、RunReport大重构） | 建议过重 (过度工程风险) | 搞复杂的环比算法、多维阈值计算在 Thin-Edge 上太重；但建立核心“防空跑熔断底线”是绝对必须的。 |
-
-二、 深度事实还原：看代码里的“静默成功”陷阱
-让我们看一下你的 src/base_scraper.py 真实代码：
-
-陷阱 1：Bulk 模式下 0 数据
-
-Apply
-# src/base_scraper.py -> _run_bulk
-def _run_bulk(self, job_name: str, batch_id: str | None = None):
-    ...
-    data = self.scrape_all(driver, []) 
-    if data:
-        self.backup_manager.save_record(self.target_table, "BULK_EXPORT", data)
-        self.db.insert_batch(self.target_table, data, batch_id=batch_id or job_name)
-    else:
-        # <--- 灾难点：只打了 Warning！没有抛异常，函数正常退出！
-        logger.warning("No data extracted in bulk mode.")
-陷阱 2：Iterative 模式下全部 Symbol 失败
-
-Apply
-# src/base_scraper.py -> _run_iterative
-def _run_iterative(self, job_name: str, batch_id: str | None = None):
-    ...
-    # 就算 success_count = 0, fail_count = 2000
-    # 只要没有未捕获异常抛出，函数默默结束
-    logger.info(f"Iterative run finished. Success: {success_count}, Failed: {fail_count}")
-后果：
-当目标网站发生反爬拦截、页面结构改版、或 API Token 失效时：
-
-scrape_one
- 全挂，success_count == 0；
-BaseScraper.run()
- 顺畅走完；
-main.py
- 认为没抛异常，接着触发云同步（传了个空 ZIP），接着触发 Post-ETL（空跑）；
-db_operator.update_batch_status(..., "SUCCESS") 成功打标；
-整个监控系统一片死寂，没人收到 Pushover，系统每天假装正常运行，实质发生大面积数据丢失（Bulk Missingness）！
-三、 区分：什么是必须做的修改？什么是过度工程？
-评审人指出了真问题，但给出的建议里有轻重之分：
-
-❌ 评审建议中的“过度工程部分”：
-为每个任务配置环比波动计算、上周数据对账、动态失败率拟合；
-这违背了 Thin-Edge 的极简原则。对账与统计指标分析是 Thick-Core（数据库端）的工作，Python 侧不应维持厚重的历史状态。
-✅ 绝对必须执行的“底线防御（修改项）”：
-“零数据产出即熔断”与“最低容忍度阈值”。 爬虫必须遵守一条红线：如果一个任务跑完，成功产出数为 0（或者抓取总数严重为 0），它就是失败，绝不能是成功！
-
-四、 最优雅、最务实的修复方案（无需大重构）
-我们不需要推翻 
-BaseScraper
- 的架构，只需要在 
-BaseScraper
- 内部补齐熔断异常（Circuit Breaker）：
-
-1. 定义或直接抛出运行时异常 RuntimeError
-在 src/base_scraper.py 中：
-
-
-Apply
-# src/base_scraper.py 改造 _run_bulk 和 _run_iterative
-
-    def _run_bulk(self, job_name: str, batch_id: str | None = None):
-        logger.info("Executing in BULK mode...")
-        driver = self.get_driver()
-        data = self.scrape_all(driver, []) 
-        if data:
-            self.backup_manager.save_record(self.target_table, "BULK_EXPORT", data)
-            self.db.insert_batch(self.target_table, data, batch_id=batch_id or job_name)
-        else:
-            # 必须抛出异常阻断！严禁静默成功！
-            raise RuntimeError(f"Bulk scrape yielded ZERO records for {self.target_table}. Potential API/HTML structure change.")
-
-    def _run_iterative(self, job_name: str, batch_id: str | None = None):
-        logger.info(f"Executing in ITERATIVE mode with {self.max_workers} threads...")
-        success_count = 0
-        fail_count = 0
-        ...
-        # 抓取结束后进行熔断检查
-        logger.info(f"Iterative run finished. Success: {success_count}, Failed: {fail_count}")
-        
-        # 核心防空跑熔断线：
-        if success_count == 0:
-            raise RuntimeError(
-                f"Iterative scrape FAILED COMPLETELY for {self.target_table}. "
-                f"Success: 0, Failures: {fail_count}. Bulk missingness detected!"
-            )
-2. 
-main_v2_nemo.py
- 的协同表现
-只要 
-BaseScraper
- 在 success_count == 0 时抛出异常：
-
-main_v2_nemo.py
- 的主 try...except 会立刻捕获该异常；
-批次状态被记录为 FAILED；
-AlertManager.send_tier2_alert
- 会立即向运维人员的手机推送 Pushover 报警：
-Kakadu Scrape Failure | Task: price_ohlcv_pre | Error: Iterative scrape FAILED COMPLETELY for ODS_PRICE_OHLCV. Success: 0, Failures: 1800...
-
-退出码返回 1，外部 Master Shell 立即感知到异常。
-总结
-评审结论：完全属实，指出了致命的业务逻辑漏洞（空跑也能打 SUCCESS 标）。
-处理策略：
-采纳：必须消除“0 数据静默成功”缺陷。在 
-BaseScraper
- 遇到全零数据或全军覆没时强制抛出异常，直接联动 Nemo 的主流程进行 FAILED 标记与 Tier 2 Pushover 报警。
-剔除过度工程：不在 Python 端搞复杂的历史环比与多维概率模型，保持 Thin-Edge 极简与可靠。
+table_name
+
+record_count
+
+SHA-256
+
+文件大小
+
+创建时间
+
+上传对象路径也按 batch 分隔：
+
+ODS_PRICE_TICK/2026-09-24/<batch_id>/records.jsonl
+ODS_PRICE_TICK/2026-09-24/<batch_id>/manifest.json
+然后：
+
+上传数据和 manifest；
+
+验证 HTTP 成功；
+
+验证远端对象或至少验证 checksum / content length；
+
+完成 DB count 对账；
+
+仅当上述步骤全部成功时清理此 batch 的本地目录；
+
+mismatch 或上传失败时必须保留本地文件。
+
+P1：内存问题已大幅改善，但并未完全收敛到 1GB 安全值
+bounded in-flight 已经解决了全量 future 堆积问题。 
+
+不过当前配置仍允许：
+
+price_ohlcv_pre.max_workers: 20；
+
+多个任务为 10 worker。 
+
+即使 Oracle pool 降为 5，20 个 HTTP worker、响应对象、JSON 解析和 backup 写入仍可能不适合 1GB VM。
+
+推荐值
+HTTP/API iterative scraper：max_workers: 2~4
+
+Selenium scraper：固定 max_workers: 1
+
+Oracle pool：当前 max=5 已显著改善；若真实负载不高，可以进一步评估 max=2~3
+
+max_in_flight：保持在 max_workers * 2 是合理的，但应加入配置上限，例如 max_in_flight <= 8
+
+建议的下一步:
+
+修改 DbOperator.insert_batch()，返回实际 attempted / inserted / dropped 计数。
+
+修改 BaseScraper，返回 RunReport。
+
+修改 BackupManager，用 batch 级 JSONL 文件替代按 symbol 覆盖式 .json 文件。
+
+在 main.py 调用 AlertManager.check_tier1_mismatch()。
+
+当写入为 0、失败比例超阈值、或数据缺失严重时，抛出异常、写 FAILED、发 Tier 2。
+
+将云端清理逻辑改为“上传 + 校验 + DB 对账成功后”执行。
+
+新增明确的 OCI_PAR_URL 环境变量；
+
+新增 oci.enabled 的代码读取；
+
+给“主动禁用”和“错误缺失配置”不同日志等级；
+
+写对应单元测试。
+
