@@ -2,10 +2,11 @@
 from __future__ import annotations
 import logging
 import os
+import concurrent.futures  # <--- 【关键新增】用于访问 wait 和 FIRST_COMPLETED
 from datetime import datetime
 from abc import ABC, abstractmethod
 from typing import Any, List, Dict, Optional, Union, Iterable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed  # 【保持不变】直接导入常用类和函数
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -115,11 +116,13 @@ class BaseScraper(ABC):
             # Use batch_id if provided, otherwise fallback to job_name
             self.db.insert_batch(self.target_table, data, batch_id=batch_id or job_name)
         else:
-            logger.warning("No data extracted in bulk mode.")
+            # --- CIRCUIT BREAKER: Zero data in bulk mode is a failure ---
+            raise RuntimeError(f"Bulk scrape yielded ZERO records for {self.target_table}. Potential API/HTML structure change.")
 
     def _run_iterative(self, job_name: str, batch_id: str | None = None):
         """
         Optimized Iterative Mode with ThreadPoolExecutor and DB Buffering.
+        Implements a bounded in-flight pattern for O(1) memory usage.
         """
         logger.info(f"Executing in ITERATIVE mode with {self.max_workers} threads...")
         
@@ -131,38 +134,66 @@ class BaseScraper(ABC):
         symbols_gen = self._get_symbol_generator()
         buffer = []
         
+        # --- BOUNDED IN-FLIGHT PATTERN FOR O(1) MEMORY ---
+        max_in_flight = max(self.max_workers * 2, 4) # Ensure at least 4 in-flight for small worker counts
+
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Submit tasks to executor
-            future_to_symbol = {
-                executor.submit(self._process_single_symbol, driver, symbol): symbol 
-                for symbol in symbols_gen
-            }
+            future_to_symbol = {}
+            
+            # 1. Pre-fill the in-flight window
+            for symbol in symbols_gen:
+                future = executor.submit(self._process_single_symbol, driver, symbol)
+                future_to_symbol[future] = symbol
+                if len(future_to_symbol) >= max_in_flight:
+                    break
 
-            for future in as_completed(future_to_symbol):
-                symbol = future_to_symbol[future]
+            # 2. Consume-one, submit-one loop to maintain bounded memory
+            while future_to_symbol:
+                # Wait for the first future to complete
+                done, _ = concurrent.futures.wait(future_to_symbol, return_when=concurrent.futures.FIRST_COMPLETED)
+                
+                for future in done:
+                    symbol = future_to_symbol.pop(future)
+                    try:
+                        result = future.result()
+                        if result:
+                            # Handle both single dict and list of dicts (One-to-Many)
+                            records = result if isinstance(result, list) else [result]
+                            buffer.extend(records)
+                            success_count += 1
+                            
+                            # Flush to DB when buffer reaches batch_size
+                            if len(buffer) >= self.batch_size:
+                                # Use batch_id if provided, otherwise fallback to job_name
+                                self.db.insert_batch(self.target_table, buffer, batch_id=batch_id or job_name)
+                                buffer = [] # Create new list to avoid reference issues
+                    except Exception as e:
+                        logger.error(f"Failed to process symbol {symbol}: {e}")
+                        fail_count += 1
+
+                # Submit new tasks to fill the in-flight window back up
                 try:
-                    result = future.result()
-                    if result:
-                        # Handle both single dict and list of dicts (One-to-Many)
-                        records = result if isinstance(result, list) else [result]
-                        buffer.extend(records)
-                        success_count += 1
-                        
-                        # Flush to DB when buffer reaches batch_size
-                        if len(buffer) >= self.batch_size:
-                            # Use batch_id if provided, otherwise fallback to job_name
-                            self.db.insert_batch(self.target_table, buffer, batch_id=batch_id or job_name)
-                            buffer = [] # Create new list to avoid reference issues
-                except Exception as e:
-                    logger.error(f"Failed to process symbol {symbol}: {e}")
-                    fail_count += 1
-
-        # Final flush for remaining records
+                    while len(future_to_symbol) < max_in_flight:
+                        next_symbol = next(symbols_gen)
+                        new_future = executor.submit(self._process_single_symbol, driver, next_symbol)
+                        future_to_symbol[new_future] = next_symbol
+                except StopIteration:
+                    # No more symbols to process, loop will exit when all futures are done
+                    pass
+        
+        # Final flush for any remaining records in the buffer
         if buffer:
             # Use batch_id if provided, otherwise fallback to job_name
             self.db.insert_batch(self.target_table, buffer, batch_id=batch_id or job_name)
 
         logger.info(f"Iterative run finished. Success: {success_count}, Failed: {fail_count}")
+
+        # --- CIRCUIT BREAKER: Zero successful symbols in iterative mode is a failure ---
+        if success_count == 0:
+            raise RuntimeError(
+                f"Iterative scrape FAILED COMPLETELY for {self.target_table}. "
+                f"Success: 0, Failures: {fail_count}. Bulk missingness detected!"
+            )
 
     def _process_single_symbol(self, driver, symbol):
         """

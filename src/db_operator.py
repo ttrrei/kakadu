@@ -6,6 +6,10 @@ Adheres to ADR-005:
 - Zero-Loss VARCHAR2 Coercion
 - Best-effort fallback on batch execution failure
 - Optimized for OCI Micro VM (1GB RAM)
+
+Critical Fixes (per Review):
+- Audit methods now RAISE exceptions (Fail-Fast, Anti-Silent-Failure).
+- Connection pool max=5 (Physical memory guardrail).
 """
 
 from __future__ import annotations
@@ -17,7 +21,6 @@ from typing import Any
 
 import oracledb
 
-# 导入配置加载类
 from .config import EnvConfig
 
 logger = logging.getLogger(__name__)
@@ -39,13 +42,13 @@ class DbOperator:
         """Lazily initialize and return the Oracle connection pool."""
         if self._pool is None:
             try:
-                logger.info("Initializing Oracle connection pool...")
+                logger.info("Initializing Oracle connection pool (max=5)...")
                 pool_kwargs = dict(
                     user=self.config.database.user,
                     password=self.config.database.password,
                     dsn=self.config.database.tns_alias,
                     min=1,
-                    max=40,
+                    max=5,          # 🔴 CRITICAL: Reduced from 40 to 5 for 1GB VM safety
                     increment=1,
                     wallet_location=self.config.database.wallet_path,
                     config_dir=self.config.database.wallet_path,
@@ -54,7 +57,7 @@ class DbOperator:
                     pool_kwargs["wallet_password"] = self.config.database.wallet_password
 
                 self._pool = oracledb.create_pool(**pool_kwargs)
-                logger.info("Oracle connection pool established.")
+                logger.info("Oracle connection pool established (max=5).")
             except oracledb.Error as exc:
                 logger.error(f"Failed to create Oracle connection pool: {exc}")
                 raise ConnectionError(f"Database connection failed: {exc}") from exc
@@ -77,21 +80,15 @@ class DbOperator:
             params: A list of parameters to pass to the procedure. Defaults to None.
         
         Raises:
-            oracledb.Error: If the procedure execution fails.
+            oracledb.Error: If the procedure execution fails (propagated to caller for Tier 2 alerting).
         """
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            # Log the attempt for auditability
             logger.info(f"Executing PL/SQL Procedure: {proc_name} | Params: {params}")
-            
-            # callproc is the standard method for executing stored procedures in python-oracledb
             cursor.callproc(proc_name, params or [])
-            
-            # Explicit commit to ensure the transformation is persisted
             conn.commit()
             logger.info(f"Successfully executed procedure: {proc_name}")
-            
         except oracledb.Error as exc:
             conn.rollback()
             logger.error(f"Database error occurred while executing {proc_name}: {exc}")
@@ -105,11 +102,17 @@ class DbOperator:
             self._pool.release(conn)
 
     # =========================================================================
-    # Batch Logging Methods (Minimalist Version)
+    # Batch Logging Methods (FAIL-FAST: Exceptions MUST propagate)
     # =========================================================================
 
     def create_batch_record(self, batch_id: str, task_name: str, source_system: str = "INTERNAL") -> None:
-        """Insert an initial 'RUNNING' record into SYS_BATCH_LOG."""
+        """
+        Insert an initial 'RUNNING' record into SYS_BATCH_LOG.
+        
+        RAISES:
+            Exception: On any DB error (connection, constraint, privilege, tablespace).
+                       Caller (main.py) MUST treat this as a fatal startup failure.
+        """
         sql = """
             INSERT INTO EQUITY.SYS_BATCH_LOG 
             (BATCH_ID, LAYER, PIPELINE_NAME, STATUS, SOURCE_SYSTEM) 
@@ -121,15 +124,21 @@ class DbOperator:
             cursor.execute(sql, batch_id=batch_id, pipeline=task_name, source=source_system)
             conn.commit()
             logger.info(f"Batch record created: {batch_id} for task {task_name}")
-        except oracledb.Error as exc:
+        except Exception as exc:
             conn.rollback()
             logger.error(f"Failed to create batch record in SYS_BATCH_LOG: {exc}")
+            raise  # 🔴 RED LINE: Must propagate to orchestrator for Fail-Fast + Tier 2 Alert
         finally:
             cursor.close()
             self._pool.release(conn)
 
     def update_batch_status(self, batch_id: str, status: str, error_message: str = None) -> None:
-        """Update the status of a batch in SYS_BATCH_LOG (Ignoring row counts)."""
+        """
+        Update the status of a batch in SYS_BATCH_LOG.
+        
+        RAISES:
+            Exception: On any DB error. Caller must handle (log critical, alert).
+        """
         sql = """
             UPDATE EQUITY.SYS_BATCH_LOG 
             SET STATUS = :p_status, 
@@ -143,9 +152,10 @@ class DbOperator:
             cursor.execute(sql, p_status=status, p_err=error_message, p_bid=batch_id)
             conn.commit()
             logger.info(f"Batch record updated: {batch_id} -> {status}")
-        except oracledb.Error as exc:
+        except Exception as exc:
             conn.rollback()
             logger.error(f"Failed to update batch status in SYS_BATCH_LOG: {exc}")
+            raise  # 🔴 RED LINE: Must propagate (caller logs CRITICAL if this fails)
         finally:
             cursor.close()
             self._pool.release(conn)
@@ -194,7 +204,7 @@ class DbOperator:
         records: list[dict[str, Any]],
         batch_id: str | None = None,
     ) -> str | None:
-        """Execute Pure-INSERT operations in small chunks."""
+        """Execute Pure-INSERT operations in small chunks (5-10 records)."""
         if not records:
             return None
 
@@ -217,6 +227,9 @@ class DbOperator:
         except Exception as exc:
             conn.rollback()
             logger.error(f"Batch insert completely failed for {table_name}: {exc}")
+            # Note: insert_batch swallows exception per ADR-005 "best effort" design,
+            # but individual row errors are logged in _execute_individually.
+            # Orchestrator relies on scraper-level success_count == 0 check for bulk failure detection.
         finally:
             cursor.close()
             self._pool.release(conn)
@@ -240,7 +253,7 @@ class DbOperator:
                 logger.error(f"Dropped record due to DB error: {exc} | Row: {row}")
 
     def close(self) -> None:
-        """Shutdown the connection pool."""
+        """Shutdown the connection pool. Called ONLY in main() finally block."""
         if self._pool:
             self._pool.close()
             self._pool = None
