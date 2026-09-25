@@ -1,95 +1,162 @@
-P0：并发 worker 正在同时写同一个 JSONL 文件和同一个 RunReport
-当前非 Selenium 的 iterative 路径会把同一个 batch_bak 和同一个 report 对象传进多个 future。 
+P0-1：数据库事务 rollback 后，InsertResult.inserted_count 会虚报成功写入数
+insert_batch() 在每个 chunk 返回成功时立即增加 inserted_count，但它只在所有 chunk 都处理完成后才调用 conn.commit()。 
 
-而 worker 内部会同时：
+如果发生下面的情况：
 
-调用 batch_bak.append_records(records) 写同一个 records.jsonl；
+前几个 chunk 的 executemany() 成功；
 
-修改 report.extracted_records_count；
+后面的 chunk 发生非 oracledb.Error 的异常；
 
-修改 report.success_symbols；
+外层进入 except 并执行 conn.rollback()；
 
-修改 report.backed_up_count。 
+前面所有尚未提交的记录都会回滚；
 
-BatchBackupContext.append_records() 本身没有 mutex / lock，却会多次执行写文件、flush、fsync 和 record_count += written。 
+但 inserted_count 没有重置为 0。 
 
-这会导致：
+此时 RunReport 会把已经回滚、数据库中实际不存在的记录报告为“已入库”。而后续 Tier 1 对账和成功审计都会使用这个虚假的计数。 
 
-JSONL 行可能交错或损坏；
+必须修改
+推荐按你 BRD 的“小批量提交”原则，在每个 chunk 成功完成后立即 commit：
 
-record_count 可能发生竞争丢失；
+for start in range(0, attempted_count, batch_size):
+    chunk = prepared_records[start:start + batch_size]
+    chunk_inserted, chunk_dropped = self._execute_chunk(cursor, conn, sql, chunk)
+    conn.commit()
+    inserted_count += chunk_inserted
+    dropped_count += chunk_dropped
+如果坚持把所有 chunk 放进同一事务，那么 outer rollback 时必须：
 
-RunReport 的计数可能不准确；
+inserted_count = 0
+dropped_count = attempted_count
+我建议每个 5–10 条 chunk commit，因为这与项目对小批次 PURE-INSERT 的设计一致。 
 
-manifest 中的 record_count 与实际文件行数不一致；
+P0-2：出现 Tier 1 数据不一致时，主流程仍会上传并删除本地备份
+目前的 BaseScraper.run() 会在：
 
-随后 Tier 1 / Tier 2 判断建立在不可靠的数据上。
+report.backed_up_count != report.inserted_db_count
+时调用 check_tier1_mismatch()，但只记录 warning，随后仍返回 RunReport。 
 
-正确修复方式
-不要给当前 worker 共享对象简单加锁作为首选方案。
-更符合 Thin-Edge、也更容易测试的实现是：
+handle_scrape() 收到 report 后，无条件调用 _sync_cloud_backup()。 
 
-worker 只负责抓取，返回：
+而 UploadManager.sync_to_cloud() 在 HTTP PUT 成功后，立刻执行：
 
-symbol, records
-主线程在 future.result() 后，串行地：
+self.backup_manager.clear_batch_dir(table_name, batch_id, date_str)
+删除本地 batch 目录。 
 
-累加 extracted count；
+这违反了你定义的 Tier 1 行为：**本地备份与 DB 入库数不一致时，必须保留备份。**规范明确规定 cloud sync 失败和数据不一致都不能让本地证据被清理。 
 
-写 JSONL；
+必须修改
+在 RunReport 中增加一个明确字段，例如：
 
-累加 backup count；
+has_tier1_mismatch: bool = False
+发生 mismatch 时设为 True。随后传 report 或 policy 给同步函数：
 
-将记录放�� DB buffer；
-
-达到 batch size 后调用 insert_batch()；
-
-合并 InsertResult。
-
-worker 线程不接触 BatchBackupContext、RunReport 和 DbOperator。
-
-这样可以保留 bounded in-flight 的内存优势，同时保证备份、审计和 DB 写入统计都是单线程、可重现的。
-
-P0：UploadManager 仍在调用已删除的旧 BackupManager API
-新的 BackupManager 已改成 batch 级方法：
-
-get_batch_dir(...)；
-
-start_batch(...)；
-
-clear_batch_dir(...)。 
-
-但 UploadManager 仍调用旧 API：
-
-get_task_dir(...)；
-
-clear_task_dir(...)。 
-
-这两个方法当前已不存在。只要未来完整 main.py 调用了 cloud sync，上传会抛出 AttributeError。如果主调度器遵循你之前设定的 Tier 1 云同步降级策略，该错误甚至可能只被记录为 warning，造成“云同步已配置但从未成功”的假象。
-
-正确修复方式
-将上传接口改为 batch 级别，例如：
-
-sync_to_cloud(
-    table_name=report.target_table,
+_sync_cloud_backup(
+    target_table=report.target_table,
     batch_id=report.batch_id,
-    backup_path=report.backup_path,
-    manifest=manifest,
+    allow_local_purge=not report.has_tier1_mismatch,
 )
-上传对象路径建议：
+在 UploadManager.sync_to_cloud() 中：
 
-<ODS_TABLE>/<YYYY-MM-DD>/<BATCH_ID>/records.jsonl
-<ODS_TABLE>/<YYYY-MM-DD>/<BATCH_ID>/manifest.json
-清理的前提应当是：
+可以选择仍上传 ZIP，保留远端取证；
 
-records 文件上传成功；
+但 allow_local_purge=False 时绝不能调用 clear_batch_dir()；
 
-manifest 上传成功；
+记录包含 batch id、backup count、inserted count 的 Tier 1 日志。
 
-远端 checksum / content-length 校验通过；
+P0-3：所谓“验证后清理”目前只是验证 HTTP 2xx，并未验证上传内容
+UploadManager 的参数包含 manifest，但当前实现没有使用它。 
 
-本地 backed_up_count == inserted_db_count；
+现有逻辑只是：
 
-仅删除该 batch 的目录。
+创建 ZIP；
 
-当前 UploadManager 只要 PUT 返回成功就清理数据，这仍未达到“验证后清理”的目标。 
+PUT 到 OCI；
+
+response.raise_for_status()；
+
+删除本地 batch。 
+
+这只能证明服务器返回 2xx，不能证明：
+
+远端对象确实可以读取；
+
+上传对象字节数正确；
+
+ZIP 内容完整；
+
+records.jsonl 与 manifest.json 都被包括；
+
+checksum 匹配；
+
+本地数据可以安全清理。
+
+必须修改
+建议最少完成以下闭环：
+
+创建 ZIP 后计算：
+
+zip_size_bytes
+
+zip_sha256
+
+PUT 时带 Content-Length，当前已做到。 
+
+PUT 后执行一个可行的远端校验：
+
+若 PAR 允许 HEAD：用 HEAD 确认对象存在、Content-Length 匹配；
+
+若 PAR 不支持 HEAD：使用 OCI SDK / 专门的 read PAR 下载或读取 object metadata；
+
+若完全无法读取远端：至少把本地 ZIP 的 checksum、size 和 manifest 一并作为对象 metadata 或单独上传 manifest。
+
+确认远端对象校验通过后，才允许清理 batch 目录。
+
+如果校验失败，抛异常；主流程只记录 Tier 1、保留本地 batch。
+
+你的 batch backup 已经生成了 JSONL checksum、record count 和 manifest，这是非常好的基础。 现在只需把它真正纳入 upload verification。
+
+P0-4：当前全量测试套件不能收集完成，且关键新功能没有被测试
+当前 pytest 在 collection 阶段就被以下旧引用中断：
+
+run_yahoo_speed_test.py 引用不存在的 YahooScraper；
+
+两个 consensus 测试引用不存在的 ConsensusScraper。 
+
+实际 scraper factory 使用的是 YahooPreScraper、YahooPostScraper、ConsensusTrendsScraper 和 ConsensusTargetsScraper。 
+
+同时，现有测试仍引用已经移除的旧 backup API：
+
+save_record()；
+
+get_task_dir()；
+
+clear_task_dir()。 
+
+而这次新增的关键契约目前没有对应测试：
+
+InsertResult；
+
+RunReport；
+
+BatchBackupContext；
+
+manifest checksum；
+
+Tier 1 mismatch 的“保留本地目录”；
+
+transaction rollback 计数；
+
+主调度器的完整流程。
+
+必须修改
+在进入 VM 前，至少达成：
+
+pytest -q test/
+无 collection error；
+
+不依赖真实 Oracle / OCI / Pushover 的 unit tests 必须全绿；
+
+实际环境测试应标记为 @pytest.mark.integration，默认不执行；
+
+性能脚本不要命名为 pytest 默认发现模式，或者明确打 marker / 排除。

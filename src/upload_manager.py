@@ -18,7 +18,9 @@ class UploadManager:
     1. Batch-Level Sync: Compresses and uploads a single ZIP per batch_id.
     2. OCI PAR Integration: Uses Pre-Authenticated Requests for stateless, secure uploads.
     3. Verify-Then-Purge: Only deletes the local batch directory after ZIP upload succeeds.
-    4. Zip Compression: Reduces storage cost and network transfer time (Critical for 1GB VM / Free Tier).
+    4. Zip Compression: Reduces storage cost and network transfer time.
+    5. Tier-1 Retention Policy: If allow_local_purge=False (Tier-1 mismatch), 
+       uploads ZIP to cloud for offsite copy BUT retains local directory for forensics/replay.
     """
 
     def __init__(self, backup_manager: BackupManager, oci_par_url: str):
@@ -62,14 +64,15 @@ class UploadManager:
         table_name: str, 
         batch_id: str, 
         backup_path: str, 
-        manifest: Dict[str, Any]
+        manifest: Dict[str, Any],
+        allow_local_purge: bool = True   # 👈 新增参数：默认 True 保持向后兼容
     ) -> bool:
         """
         Executes the full sync lifecycle for a single batch:
         1. Compress batch directory to ZIP
         2. Upload ZIP to OCI Object Storage via PAR (PUT)
         3. Verify upload success (HTTP 2xx)
-        4. Purge local batch directory (clear_batch_dir)
+        4. **Conditionally** purge local batch directory (controlled by allow_local_purge)
         5. Cleanup temporary ZIP file
         
         Failure at any step raises Exception -> Caller (main.py) treats as Tier-1 Warning & Retains Local Data.
@@ -79,7 +82,9 @@ class UploadManager:
         :param backup_path: Full local path to the batch directory 
                             (e.g., /home/ubuntu/backup/ODS_PRICE_OHLCV/2026-09-15/abc123/)
         :param manifest: The manifest dict returned by BatchBackupContext.finalize()
-        :return: True if sync & purge successful.
+        :param allow_local_purge: If False (Tier-1 mismatch), SKIP local deletion. 
+                                  ZIP still uploaded to cloud for offsite redundancy.
+        :return: True if sync successful.
         """
         if not os.path.isdir(backup_path):
             raise NotADirectoryError(f"Backup path does not exist: {backup_path}")
@@ -119,9 +124,17 @@ class UploadManager:
 
             logger.info(f"Successfully uploaded batch {batch_id} to OCI: {cloud_object_path}")
 
-            # 4. Purge Local Batch Directory (ONLY after successful upload)
-            # This calls BackupManager.clear_batch_dir(table_name, batch_id, date_str)
-            self.backup_manager.clear_batch_dir(table_name, batch_id, date_str)
+            # 4. Conditional Local Purge (Core P0-2 Fix)
+            if allow_local_purge:
+                # Normal flow: Upload verified -> Purge local
+                self.backup_manager.clear_batch_dir(table_name, batch_id, date_str)
+                logger.info(f"Local batch directory purged: {backup_path}")
+            else:
+                # Tier-1 Policy: Upload succeeded BUT local mismatch detected -> RETAIN local
+                logger.warning(
+                    f"[TIER-1 POLICY] Local backup RETAINED for {table_name}/{batch_id} "
+                    f"(allow_local_purge=False). Cloud copy exists at: {cloud_object_path}"
+                )
             
             return True
 
@@ -130,7 +143,7 @@ class UploadManager:
             # Re-raise to let main.py handle Tier-1 Warning & Retention
             raise
         finally:
-            # 5. Always cleanup temporary ZIP file
+            # 5. Always cleanup temporary ZIP file (never leave zip on disk)
             if zip_path and os.path.exists(zip_path):
                 try:
                     os.remove(zip_path)

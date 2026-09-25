@@ -34,6 +34,7 @@ class RunReport:
     failed_symbols: int = 0
     backup_path: str = ""
     manifest: Dict[str, Any] = field(default_factory=dict)
+    has_tier1_mismatch: bool = False
 
     def merge_insert_result(self, res: InsertResult):
         self.attempted_db_count += res.attempted_count
@@ -144,6 +145,7 @@ class BaseScraper(ABC):
                     task_name=job_name,
                     backup_path=report.backup_path
                 )
+                report.has_tier1_mismatch = True
 
             logger.info(f"Job {job_name} successfully validated. Report: {report}")
             return report

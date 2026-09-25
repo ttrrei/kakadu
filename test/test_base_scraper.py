@@ -124,8 +124,15 @@ class TestBaseScraper(unittest.TestCase):
         mock_chrome.assert_called_once()
         self.mock_db.insert_batch.assert_called_once()
         args, kwargs = self.mock_db.insert_batch.call_args
-        self.assertEqual(kwargs.get('batch_id'), job_name)
-        logger.info("Verified: Bulk run flow completed.")
+        
+        # ✅ 修正：batch_id 是 UUID (32位 hex)，不再等于 job_name
+        called_batch_id = kwargs.get('batch_id')
+        self.assertIsInstance(called_batch_id, str)
+        self.assertEqual(len(called_batch_id), 32)  # uuid4().hex 长度
+        
+        # 可选：验证 batch_id 也传给了 create_batch_record (如果 mock 了 db)
+        # self.mock_db.create_batch_record.assert_called_once_with(batch_id=called_batch_id, ...)
+        logger.info("Verified: Bulk run flow completed with UUID batch_id.")
 
     @patch('src.base_scraper.SymbolProvider')
     def test_iterative_buffering_and_errors(self, mock_provider_class):
@@ -140,8 +147,12 @@ class TestBaseScraper(unittest.TestCase):
         # 成功 4 个，FAIL 1 个。
         # 写入时机：S1,S2,S3 (batch 3) -> 写入1次； S4 -> 写入1次。总共 2 次。
         self.assertEqual(self.mock_db.insert_batch.call_count, 2)
-        # 备份应被调用 4 次 (S1, S2, S3, S4)
-        self.assertEqual(self.iter_scraper.backup_manager.save_record.call_count, 4)
+        
+        # ✅ 修正：验证 BatchBackupContext.append_records 调用次数 (4次成功 symbol)
+        # start_batch 返回 context manager -> __enter__ 返回 BatchBackupContext 实例
+        mock_batch_context = self.iter_scraper.backup_manager.start_batch.return_value.__enter__.return_value
+        self.assertEqual(mock_batch_context.append_records.call_count, 4)
+        
         logger.info("Verified: Iterative mode handles errors and buffering correctly.")
 
     @patch('src.base_scraper.SymbolProvider')
@@ -161,11 +172,20 @@ class TestBaseScraper(unittest.TestCase):
         # 验证最后一次写入的数据量
         last_call_records = self.mock_db.insert_batch.call_args[0][1]
         self.assertEqual(len(last_call_records), 3)
+        
+        # ✅ 修正：验证备份写入次数 (2个 symbol，每次 scrape_one 返回 list 视为一次 append_records 调用)
+        mock_batch_context = self.otm_scraper.backup_manager.start_batch.return_value.__enter__.return_value
+        self.assertEqual(mock_batch_context.append_records.call_count, 2)
+        
         logger.info("Verified: One-to-Many records are buffered and flushed correctly.")
 
+    @patch('src.base_scraper.SymbolProvider')  # ✅ 补齐 mock，防止 run 内部实例化 SymbolProvider 连真实 DB
     @patch('selenium.webdriver.Chrome')
-    def test_driver_lifecycle(self, mock_chrome):
+    def test_driver_lifecycle(self, mock_chrome, mock_provider_class):
         """验证 Driver 延迟加载与强制关闭"""
+        mock_provider_inst = mock_provider_class.return_value
+        mock_provider_inst.get_target_symbols.return_value = iter([])  # 空迭代器，快速结束
+        
         mock_driver_inst = MagicMock()
         mock_chrome.return_value = mock_driver_inst
         
@@ -175,10 +195,8 @@ class TestBaseScraper(unittest.TestCase):
         self.assertIsNotNone(self.bulk_scraper._driver)
         
         # 2. 验证 run 结束后的关闭
-        with patch('src.base_scraper.SymbolProvider') as mock_sp:
-            mock_sp.return_value.get_target_symbols.return_value = iter([])
-            self.bulk_scraper.run(job_name="driver_test")
-            mock_driver_inst.quit.assert_called_once()
+        self.bulk_scraper.run(job_name="driver_test")
+        mock_driver_inst.quit.assert_called_once()
         logger.info("Verified: Driver lazy-loading and lifecycle management.")
 
 if __name__ == "__main__":

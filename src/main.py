@@ -105,7 +105,7 @@ def _resolve_oci_par_url() -> Optional[str]:
     logger.warning("[TIER-1] OCI cloud sync is enabled (oci.enabled = true), but OCI_PAR_URL is missing or invalid.")
     return None
 
-def _sync_cloud_backup(target_table: str, batch_id: str) -> bool:
+def _sync_cloud_backup(target_table: str, batch_id: str, allow_local_purge: bool = True) -> bool:
     """
     Executes Batch-Level Sync: Compress batch dir -> Upload to OCI -> Verify -> Purge local batch dir.
     Failure is NON-FATAL (Tier 1 Warning): Logs error, retains local backup, returns False.
@@ -141,7 +141,8 @@ def _sync_cloud_backup(target_table: str, batch_id: str) -> bool:
             table_name=target_table, 
             batch_id=batch_id, 
             backup_path=backup_path, 
-            manifest=manifest
+            manifest=manifest,
+            allow_local_purge=allow_local_purge   # <--- 新增参数
         )
         logger.info(f"Cloud sync & verified cleanup successful for {target_table} [Batch: {batch_id}].")
         return True
@@ -198,7 +199,11 @@ def handle_scrape(task_name: str) -> int:
         report: RunReport = scraper.run(job_name=task_name, batch_id=batch_id)
 
         # 3. Cloud Sync (Post-Ingestion, Batch-level, Tier-1 Tolerance)
-        _sync_cloud_backup(target_table, batch_id=batch_id)
+        _sync_cloud_backup(
+            target_table=target_table, 
+            batch_id=batch_id, 
+            allow_local_purge=not report.has_tier1_mismatch
+        )
 
         # 4. Post-Action ETL (ADR-020: Mapping Driven)
         post_group = f"post_{task_name}"
