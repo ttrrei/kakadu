@@ -4,26 +4,45 @@ Adheres to ADR-005:
 - Pure-INSERT (no MERGE INTO)
 - Automatic Audit Injection (BATCH_ID, LOAD_TIME)
 - Zero-Loss VARCHAR2 Coercion
-- Best-effort fallback on batch execution failure
+- Best-effort fallback on batch execution failure (with precise InsertResult tracking)
 - Optimized for OCI Micro VM (1GB RAM)
 
-Critical Fixes (per Review):
+Critical Fixes (per Review & P0 Fix):
 - Audit methods now RAISE exceptions (Fail-Fast, Anti-Silent-Failure).
 - Connection pool max=5 (Physical memory guardrail).
+- insert_batch now returns structured InsertResult (attempted, inserted, dropped) to prevent silent data loss.
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, List, Optional, Tuple
 
 import oracledb
 
 from .config import EnvConfig
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class InsertResult:
+    """Represents the actual database persistence metrics for a batch insertion."""
+    batch_id: str
+    attempted_count: int
+    inserted_count: int
+    dropped_count: int
+
+    @property
+    def is_fully_successful(self) -> bool:
+        return self.attempted_count > 0 and self.inserted_count == self.attempted_count
+
+    @property
+    def has_dropped_records(self) -> bool:
+        return self.dropped_count > 0
 
 
 class DbOperator:
@@ -48,7 +67,7 @@ class DbOperator:
                     password=self.config.database.password,
                     dsn=self.config.database.tns_alias,
                     min=1,
-                    max=5,          # 🔴 CRITICAL: Reduced from 40 to 5 for 1GB VM safety
+                    max=5,          # 🔴 CRITICAL: Reduced for 1GB VM safety
                     increment=1,
                     wallet_location=self.config.database.wallet_path,
                     config_dir=self.config.database.wallet_path,
@@ -110,8 +129,7 @@ class DbOperator:
         Insert an initial 'RUNNING' record into SYS_BATCH_LOG.
         
         RAISES:
-            Exception: On any DB error (connection, constraint, privilege, tablespace).
-                       Caller (main.py) MUST treat this as a fatal startup failure.
+            Exception: On any DB error. Caller (main.py) MUST treat as fatal startup failure.
         """
         sql = """
             INSERT INTO EQUITY.SYS_BATCH_LOG 
@@ -127,7 +145,7 @@ class DbOperator:
         except Exception as exc:
             conn.rollback()
             logger.error(f"Failed to create batch record in SYS_BATCH_LOG: {exc}")
-            raise  # 🔴 RED LINE: Must propagate to orchestrator for Fail-Fast + Tier 2 Alert
+            raise
         finally:
             cursor.close()
             self._pool.release(conn)
@@ -137,7 +155,7 @@ class DbOperator:
         Update the status of a batch in SYS_BATCH_LOG.
         
         RAISES:
-            Exception: On any DB error. Caller must handle (log critical, alert).
+            Exception: On any DB error. Caller must handle.
         """
         sql = """
             UPDATE EQUITY.SYS_BATCH_LOG 
@@ -155,13 +173,13 @@ class DbOperator:
         except Exception as exc:
             conn.rollback()
             logger.error(f"Failed to update batch status in SYS_BATCH_LOG: {exc}")
-            raise  # 🔴 RED LINE: Must propagate (caller logs CRITICAL if this fails)
+            raise
         finally:
             cursor.close()
             self._pool.release(conn)
 
     # =========================================================================
-    # Core Ingestion Methods (Existing Logic Preserved)
+    # Core Ingestion Methods (P0 Fix: Precise Counting & InsertResult)
     # =========================================================================
 
     def _prepare_records(
@@ -203,13 +221,20 @@ class DbOperator:
         table_name: str,
         records: list[dict[str, Any]],
         batch_id: str | None = None,
-    ) -> str | None:
-        """Execute Pure-INSERT operations in small chunks (5-10 records)."""
+    ) -> InsertResult:
+        """
+        Execute Pure-INSERT operations in small chunks (5-10 records).
+        
+        Returns:
+            InsertResult containing exact attempted, inserted, and dropped counts.
+        """
         if not records:
-            return None
+            eff_id = batch_id or uuid.uuid4().hex
+            return InsertResult(batch_id=eff_id, attempted_count=0, inserted_count=0, dropped_count=0)
 
         prepared_records, columns = self._prepare_records(records, batch_id)
         effective_batch_id = prepared_records[0]["BATCH_ID"]
+        attempted_count = len(prepared_records)
 
         cols_sql = ", ".join([f'"{col}"' for col in columns])
         binds_sql = ", ".join([f":{col}" for col in columns])
@@ -217,40 +242,58 @@ class DbOperator:
 
         batch_size = getattr(self.config, "insert_batch_size", 10)
         
+        inserted_count = 0
+        dropped_count = 0
+
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            for start in range(0, len(prepared_records), batch_size):
+            for start in range(0, attempted_count, batch_size):
                 chunk = prepared_records[start : start + batch_size]
-                self._execute_chunk(cursor, conn, sql, chunk)
+                chunk_inserted, chunk_dropped = self._execute_chunk(cursor, conn, sql, chunk)
+                inserted_count += chunk_inserted
+                dropped_count += chunk_dropped
+            
             conn.commit()
         except Exception as exc:
             conn.rollback()
             logger.error(f"Batch insert completely failed for {table_name}: {exc}")
-            # Note: insert_batch swallows exception per ADR-005 "best effort" design,
-            # but individual row errors are logged in _execute_individually.
-            # Orchestrator relies on scraper-level success_count == 0 check for bulk failure detection.
+            # If the entire batch transaction fails catastrophically
+            dropped_count = attempted_count - inserted_count
         finally:
             cursor.close()
             self._pool.release(conn)
 
-        return effective_batch_id
+        result = InsertResult(
+            batch_id=effective_batch_id,
+            attempted_count=attempted_count,
+            inserted_count=inserted_count,
+            dropped_count=dropped_count
+        )
+        logger.info(f"InsertResult [{table_name}] -> Attempted: {attempted_count}, Inserted: {inserted_count}, Dropped: {dropped_count}")
+        return result
 
-    def _execute_chunk(self, cursor, conn, sql: str, chunk: list[dict[str, Any]]) -> None:
-        """Execute a chunk and fallback to individual rows on failure."""
+    def _execute_chunk(self, cursor, conn, sql: str, chunk: list[dict[str, Any]]) -> tuple[int, int]:
+        """Execute a chunk via executemany. Fallback to individual rows on failure."""
         try:
             cursor.executemany(sql, chunk)
+            return len(chunk), 0
         except oracledb.Error as exc:
             logger.warning(f"Chunk failed ({len(chunk)} rows): {exc}. Retrying individually...")
-            self._execute_individually(cursor, conn, sql, chunk)
+            return self._execute_individually(cursor, conn, sql, chunk)
 
-    def _execute_individually(self, cursor, conn, sql: str, chunk: list[dict[str, Any]]) -> None:
-        """Best-effort fallback: commit good rows, log and drop bad ones."""
+    def _execute_individually(self, cursor, conn, sql: str, chunk: list[dict[str, Any]]) -> tuple[int, int]:
+        """Best-effort fallback: commit good rows, log and drop bad ones. Returns (inserted, dropped)."""
+        inserted = 0
+        dropped = 0
         for row in chunk:
             try:
                 cursor.execute(sql, row)
+                inserted += 1
             except oracledb.Error as exc:
                 logger.error(f"Dropped record due to DB error: {exc} | Row: {row}")
+                dropped += 1
+        return inserted, dropped
 
     def close(self) -> None:
         """Shutdown the connection pool. Called ONLY in main() finally block."""

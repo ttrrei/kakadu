@@ -55,9 +55,8 @@ class PushoverConfig:
 
 @dataclass
 class OCIConfig:
-    config_path: str = ""
-    bucket_namespace: str = ""
-    bucket_name: str = ""
+    enabled: bool = False
+    par_url: str = ""
 
 @dataclass
 class EnvConfig:
@@ -74,6 +73,10 @@ class EnvConfig:
         else:
             load_dotenv(override=override)
 
+        # Parse OCI enabled flag safely from env string ("true", "1", "yes", etc.)
+        oci_enabled_str = os.getenv("OCI_ENABLED", "false").lower()
+        oci_enabled = oci_enabled_str in ("true", "1", "t", "yes", "y")
+
         return cls(
             database=DatabaseConfig(
                 wallet_path=os.getenv("ORACLE_WALLET_PATH", ""),
@@ -87,9 +90,8 @@ class EnvConfig:
                 api_token=os.getenv("PUSHOVER_API_TOKEN", ""),
             ),
             oci=OCIConfig(
-                config_path=os.getenv("OCI_CONFIG_PATH", ""),
-                bucket_namespace=os.getenv("OCI_BUCKET_NAMESPACE", ""),
-                bucket_name=os.getenv("OCI_BUCKET_NAME", ""),
+                enabled=oci_enabled,
+                par_url=os.getenv("OCI_PAR_URL", ""),
             ),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
         )
@@ -127,8 +129,6 @@ class ConfigManager:
         Allows access to YAML config using dot-notation or nested keys.
         Example: config.get('scrapers', {}).get('company_master', {})
         """
-        # This implementation allows the .get().get() chain used in scrapers
-        # by returning the sub-dictionary from the YAML config.
         return self._yaml_config.get(key, default)
 
 # Instantiate the singleton object that the rest of the app imports

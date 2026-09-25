@@ -2,21 +2,45 @@
 from __future__ import annotations
 import logging
 import os
-import concurrent.futures  # <--- 【关键新增】用于访问 wait 和 FIRST_COMPLETED
+import uuid
+import concurrent.futures
 from datetime import datetime
 from abc import ABC, abstractmethod
 from typing import Any, List, Dict, Optional, Union, Iterable
-from concurrent.futures import ThreadPoolExecutor, as_completed  # 【保持不变】直接导入常用类和函数
+from dataclasses import dataclass, field
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 
-from .db_operator import db as db_operator
-from .backup_manager import BackupManager
+from .db_operator import db as db_operator, InsertResult
+from .backup_manager import BackupManager, BatchBackupContext
+from .alert_manager import alert_manager, AlertManager
 from .config import config
 from .symbol_provider import SymbolProvider
 
 logger = logging.getLogger(__name__)
+
+@dataclass
+class RunReport:
+    """Represents the complete execution metrics of a scraper run."""
+    target_table: str
+    batch_id: str = ""
+    extracted_records_count: int = 0
+    backed_up_count: int = 0
+    attempted_db_count: int = 0
+    inserted_db_count: int = 0
+    dropped_db_count: int = 0
+    success_symbols: int = 0
+    failed_symbols: int = 0
+    backup_path: str = ""
+
+    def merge_insert_result(self, res: InsertResult):
+        self.attempted_db_count += res.attempted_count
+        self.inserted_db_count += res.inserted_count
+        self.dropped_db_count += res.dropped_count
+        if not self.batch_id and res.batch_id:
+            self.batch_id = res.batch_id
+
 
 class BaseScraper(ABC):
     """
@@ -24,8 +48,9 @@ class BaseScraper(ABC):
     Implements the Template Method pattern to decouple orchestration from extraction.
     """
 
-    def __init__(self, db_op=db_operator):
+    def __init__(self, db_op=db_operator, alert_mgr: AlertManager = alert_manager):
         self.db = db_op
+        self.alert_manager = alert_mgr
         self.config = config
         
         backup_path = self.config.get('system', {}).get('backup_dir', '/home/ubuntu/backup')
@@ -40,7 +65,6 @@ class BaseScraper(ABC):
         self.is_bulk_task = getattr(self, 'is_bulk_task', scraper_cfg.get('is_bulk', False))
         self.needs_driver = getattr(self, 'needs_driver', scraper_cfg.get('needs_driver', True))
         
-        # Direct target table from config (per simplified routing design)
         self.target_table = scraper_cfg.get('target_table')
         self._driver: Optional[webdriver.Chrome] = None
 
@@ -63,25 +87,61 @@ class BaseScraper(ABC):
         if self._driver is None: self._driver = self._create_driver()
         return self._driver
 
-    def run(self, job_name: str = "", batch_id: str | None = None):
+    def run(self, job_name: str = "", batch_id: str | None = None) -> RunReport:
         """
-        Main execution entry point.
-        
-        Args:
-            job_name: Human-readable name of the job.
-            batch_id: The unique system batch ID (from SYS_BATCH_LOG). 
-                      If None, the system will fallback to job_name or generate a UUID.
+        Main execution entry point with P0 Decision & Circuit Breaker Logic.
         """
+        effective_batch_id = batch_id or uuid.uuid4().hex
+        report = RunReport(target_table=self.target_table or "UNKNOWN", batch_id=effective_batch_id)
+
         try:
             if not self.target_table:
                 raise KeyError(f"Scraper {getattr(self, 'scraper_name', 'unknown')} is missing 'target_table' in config.yaml")
 
-            logger.info(f"Starting job {job_name} on table {self.target_table}...")
-            if self.is_bulk_task:
-                self._run_bulk(job_name, batch_id)
-            else:
-                self._run_iterative(job_name, batch_id)
-            logger.info(f"Job {job_name} completed successfully.")
+            report.target_table = self.target_table
+            logger.info(f"Starting job {job_name} on table {self.target_table} [Batch: {effective_batch_id}]...")
+
+            # ===== 开启 Batch 级备份上下文，全流程唯一数据文件 =====
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            with self.backup_manager.start_batch(self.target_table, effective_batch_id, date_str) as batch_bak:
+                if self.is_bulk_task:
+                    report = self._run_bulk(job_name, effective_batch_id, batch_bak, report)
+                else:
+                    report = self._run_iterative(job_name, effective_batch_id, batch_bak, report)
+
+                # 确保 backup_path 在返回前被正确赋值
+                report.backup_path = batch_bak.batch_dir
+
+                # 显式 finalize，生成 manifest.json
+                manifest = batch_bak.finalize()
+                logger.info(f"Backup finalized successfully: {manifest}")
+
+            # =========================================================================
+            # P0 熔断决策与对账逻辑 (Adhering to main_review.txt & Review Guidelines)
+            # =========================================================================
+
+            # 1. Tier 2 判定：有抽取但零入库 -> 严重系统性故障
+            if report.extracted_records_count > 0 and report.inserted_db_count == 0:
+                crit_msg = (
+                    f"Tier 2 CRITICAL FAILURE in job '{job_name}' [{self.target_table}]: "
+                    f"Extracted {report.extracted_records_count} records but inserted 0 into database."
+                )
+                logger.critical(crit_msg)
+                self.alert_manager.send_tier2_alert(crit_msg, priority=1)
+                raise RuntimeError(crit_msg)
+
+            # 2. Tier 1 判定：本地真实落盘数 (backed_up_count) vs 实际入库条数不一致
+            if report.backed_up_count != report.inserted_db_count:
+                self.alert_manager.check_tier1_mismatch(
+                    local_count=report.backed_up_count,
+                    db_count=report.inserted_db_count,
+                    task_name=job_name,
+                    backup_path=report.backup_path
+                )
+
+            logger.info(f"Job {job_name} successfully validated. Report: {report}")
+            return report
+
         except Exception as e:
             logger.error(f"Critical failure in job {job_name}: {e}")
             raise
@@ -91,119 +151,129 @@ class BaseScraper(ABC):
                 self._driver = None
 
     def _get_symbol_generator(self) -> Iterable[str]:
-        """
-        Helper to create a SymbolProvider based on current scraper's config.
-        """
         scraper_name = getattr(self, 'scraper_name', None)
         scraper_cfg = self.config.get(scraper_name, {}) if scraper_name else {}
         symbol_source = scraper_cfg.get('symbol_source')
         
         if not symbol_source:
             raise KeyError(
-                f"Configuration Error: 'symbol_source' is missing for scraper '{scraper_name}'. "
-                f"Please add 'symbol_source: TABLE_NAME' to the {scraper_name} section in config.yaml."
+                f"Configuration Error: 'symbol_source' is missing for scraper '{scraper_name}']."
             )
             
         provider = SymbolProvider(source_table=symbol_source)
         return provider.get_target_symbols()
 
-    def _run_bulk(self, job_name: str, batch_id: str | None = None):
+    def _run_bulk(self, job_name: str, batch_id: str, batch_bak: BatchBackupContext, report: RunReport) -> RunReport:
         logger.info("Executing in BULK mode...")
         driver = self.get_driver()
         data = self.scrape_all(driver, []) 
         if data:
-            self.backup_manager.save_record(self.target_table, "BULK_EXPORT", data)
-            # Use batch_id if provided, otherwise fallback to job_name
-            self.db.insert_batch(self.target_table, data, batch_id=batch_id or job_name)
+            report.extracted_records_count = len(data)
+            
+            # 实时落盘备份 + 精准计数
+            written = batch_bak.append_records(data)
+            report.backed_up_count += written
+            
+            ins_result = self.db.insert_batch(self.target_table, data, batch_id=batch_id)
+            report.merge_insert_result(ins_result)
         else:
-            # --- CIRCUIT BREAKER: Zero data in bulk mode is a failure ---
             raise RuntimeError(f"Bulk scrape yielded ZERO records for {self.target_table}. Potential API/HTML structure change.")
+            
+        report.backup_path = batch_bak.batch_dir
+        return report
 
-    def _run_iterative(self, job_name: str, batch_id: str | None = None):
-        """
-        Optimized Iterative Mode with ThreadPoolExecutor and DB Buffering.
-        Implements a bounded in-flight pattern for O(1) memory usage.
-        """
-        logger.info(f"Executing in ITERATIVE mode with {self.max_workers} threads...")
+    def _run_iterative(self, job_name: str, batch_id: str, batch_bak: BatchBackupContext, report: RunReport) -> RunReport:
+        logger.info(f"Executing in ITERATIVE mode (max_workers={self.max_workers})...")
         
-        success_count = 0
-        fail_count = 0
         driver = self.get_driver()
-        
-        # Memory Safety: Iterate directly from generator
         symbols_gen = self._get_symbol_generator()
         buffer = []
         
-        # --- BOUNDED IN-FLIGHT PATTERN FOR O(1) MEMORY ---
-        max_in_flight = max(self.max_workers * 2, 4) # Ensure at least 4 in-flight for small worker counts
+        # 安全修复：Selenium Driver 不支持多线程共享，当需要 Driver 时强制单线程串行规避 Crash
+        effective_workers = 1 if self.needs_driver else self.max_workers
 
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_symbol = {}
-            
-            # 1. Pre-fill the in-flight window
+        if effective_workers == 1:
             for symbol in symbols_gen:
-                future = executor.submit(self._process_single_symbol, driver, symbol)
-                future_to_symbol[future] = symbol
-                if len(future_to_symbol) >= max_in_flight:
-                    break
-
-            # 2. Consume-one, submit-one loop to maintain bounded memory
-            while future_to_symbol:
-                # Wait for the first future to complete
-                done, _ = concurrent.futures.wait(future_to_symbol, return_when=concurrent.futures.FIRST_COMPLETED)
-                
-                for future in done:
-                    symbol = future_to_symbol.pop(future)
-                    try:
-                        result = future.result()
-                        if result:
-                            # Handle both single dict and list of dicts (One-to-Many)
-                            records = result if isinstance(result, list) else [result]
-                            buffer.extend(records)
-                            success_count += 1
-                            
-                            # Flush to DB when buffer reaches batch_size
-                            if len(buffer) >= self.batch_size:
-                                # Use batch_id if provided, otherwise fallback to job_name
-                                self.db.insert_batch(self.target_table, buffer, batch_id=batch_id or job_name)
-                                buffer = [] # Create new list to avoid reference issues
-                    except Exception as e:
-                        logger.error(f"Failed to process symbol {symbol}: {e}")
-                        fail_count += 1
-
-                # Submit new tasks to fill the in-flight window back up
                 try:
-                    while len(future_to_symbol) < max_in_flight:
-                        next_symbol = next(symbols_gen)
-                        new_future = executor.submit(self._process_single_symbol, driver, next_symbol)
-                        future_to_symbol[new_future] = next_symbol
-                except StopIteration:
-                    # No more symbols to process, loop will exit when all futures are done
-                    pass
+                    result = self._process_single_symbol(driver, symbol, batch_bak, report)
+                    if result:
+                        records = result if isinstance(result, list) else [result]
+                        buffer.extend(records)
+                        
+                        if len(buffer) >= self.batch_size:
+                            ins_result = self.db.insert_batch(self.target_table, buffer, batch_id=batch_id)
+                            report.merge_insert_result(ins_result)
+                            buffer = [] 
+                except Exception as e:
+                    logger.error(f"Failed to process symbol {symbol}: {e}")
+                    report.failed_symbols += 1
+        else:
+            max_in_flight = min(effective_workers * 2, self.config.get('system', {}).get('max_in_flight', 8))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=effective_workers) as executor:
+                future_to_symbol = {}
+                
+                for symbol in symbols_gen:
+                    future = executor.submit(self._process_single_symbol, driver, symbol, batch_bak, report)
+                    future_to_symbol[future] = symbol
+                    if len(future_to_symbol) >= max_in_flight:
+                        break
+
+                while future_to_symbol:
+                    done, _ = concurrent.futures.wait(future_to_symbol, return_when=concurrent.futures.FIRST_COMPLETED)
+                    
+                    for future in done:
+                        symbol = future_to_symbol.pop(future)
+                        try:
+                            result = future.result()
+                            if result:
+                                records = result if isinstance(result, list) else [result]
+                                buffer.extend(records)
+                                
+                                if len(buffer) >= self.batch_size:
+                                    ins_result = self.db.insert_batch(self.target_table, buffer, batch_id=batch_id)
+                                    report.merge_insert_result(ins_result)
+                                    buffer = [] 
+                        except Exception as e:
+                            logger.error(f"Failed to process symbol {symbol}: {e}")
+                            report.failed_symbols += 1
+
+                    try:
+                        while len(future_to_symbol) < max_in_flight:
+                            next_symbol = next(symbols_gen)
+                            new_future = executor.submit(self._process_single_symbol, driver, next_symbol, batch_bak, report)
+                            future_to_symbol[new_future] = next_symbol
+                    except StopIteration:
+                        pass
         
-        # Final flush for any remaining records in the buffer
         if buffer:
-            # Use batch_id if provided, otherwise fallback to job_name
-            self.db.insert_batch(self.target_table, buffer, batch_id=batch_id or job_name)
+            ins_result = self.db.insert_batch(self.target_table, buffer, batch_id=batch_id)
+            report.merge_insert_result(ins_result)
 
-        logger.info(f"Iterative run finished. Success: {success_count}, Failed: {fail_count}")
+        logger.info(
+            f"Iterative run finished. Symbols Success: {report.success_symbols}, Failed: {report.failed_symbols} | "
+            f"Extracted: {report.extracted_records_count}, Backed Up: {report.backed_up_count}, Inserted DB: {report.inserted_db_count}, Dropped DB: {report.dropped_db_count}"
+        )
 
-        # --- CIRCUIT BREAKER: Zero successful symbols in iterative mode is a failure ---
-        if success_count == 0:
+        if report.success_symbols == 0:
             raise RuntimeError(
                 f"Iterative scrape FAILED COMPLETELY for {self.target_table}. "
-                f"Success: 0, Failures: {fail_count}. Bulk missingness detected!"
+                f"Success: 0, Failures: {report.failed_symbols}. Bulk missingness detected!"
             )
 
-    def _process_single_symbol(self, driver, symbol):
-        """
-        Extraction logic for a single symbol.
-        """
+        report.backup_path = batch_bak.batch_dir
+        return report
+
+    def _process_single_symbol(self, driver, symbol, batch_bak: BatchBackupContext, report: RunReport):
         try:
             result = self.scrape_one(driver, symbol)
             if result:
-                # Local backup is performed immediately to ensure zero data loss
-                self.backup_manager.save_record(self.target_table, symbol, result)
+                records = result if isinstance(result, list) else [result]
+                report.extracted_records_count += len(records)
+                report.success_symbols += 1
+                
+                # 实时落盘到 records.jsonl 并累加真实 backed_up_count
+                written = batch_bak.append_records(records)
+                report.backed_up_count += written
             return result
         except Exception as e:
             logger.error(f"Scrape error for {symbol}: {e}")
@@ -211,10 +281,8 @@ class BaseScraper(ABC):
 
     @abstractmethod
     def scrape_all(self, driver: Optional[webdriver.Chrome], symbols: List[str]) -> List[Dict[str, Any]]: 
-        """Implement for Bulk mode"""
         pass
 
     @abstractmethod
     def scrape_one(self, driver: Optional[webdriver.Chrome], symbol: str) -> Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]: 
-        """Implement for Iterative mode"""
         pass
