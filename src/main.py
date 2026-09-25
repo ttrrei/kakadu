@@ -20,6 +20,7 @@ import sys
 import os
 import uuid
 import argparse
+import json
 import logging
 from datetime import datetime
 from typing import Optional
@@ -133,7 +134,6 @@ def _sync_cloud_backup(target_table: str, batch_id: str) -> bool:
         if not os.path.exists(manifest_path):
             raise FileNotFoundError(f"Manifest not found at {manifest_path}. Backup may be incomplete.")
         
-        import json
         with open(manifest_path, 'r', encoding='utf-8') as f:
             manifest = json.load(f)
 
