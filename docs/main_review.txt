@@ -1,190 +1,95 @@
-P0：数据库写入失败仍可能被标记为 SUCCESS
-虽然审计写入失败已经会抛异常，但数据插入方法 insert_batch() 仍会吞掉整体插入错误：
+P0：并发 worker 正在同时写同一个 JSONL 文件和同一个 RunReport
+当前非 Selenium 的 iterative 路径会把同一个 batch_bak 和同一个 report 对象传进多个 future。 
 
-except Exception as exc:
-    conn.rollback()
-    logger.error(...)
-然后仍返回 effective_batch_id。 
+而 worker 内部会同时：
 
-单条 fallback 插入失败时也只是记录“Dropped record”，没有返回实际成功数或失败数。 
+调用 batch_bak.append_records(records) 写同一个 records.jsonl；
 
-而 BaseScraper 的 success_count 统计的是“scrape_one() 返回了数据”，不是“数据实际成功写入 Oracle”的条数。 
+修改 report.extracted_records_count；
 
-这可能造成以下情况：
+修改 report.success_symbols；
 
-API 成功抓到 100 条记录；
+修改 report.backed_up_count。 
 
-本地备份也写成功；
+BatchBackupContext.append_records() 本身没有 mutex / lock，却会多次执行写文件、flush、fsync 和 record_count += written。 
 
-Oracle 因字段、连接或 SQL 错误而一条未写入；
+这会导致：
 
-insert_batch() 吞掉错误；
+JSONL 行可能交错或损坏；
 
-success_count > 0；
+record_count 可能发生竞争丢失；
 
-main_v3_gemini.py 最终写 SUCCESS。
+RunReport 的计数可能不准确；
 
-这意味着此前的“本地备份 vs DB 写入计数”的 P0 问题尚未真正修复。
+manifest 中的 record_count 与实际文件行数不一致；
 
-推荐修复方式
-不要让 insert_batch() 仅返回 batch_id；应返回显式结果，例如：
+随后 Tier 1 / Tier 2 判断建立在不可靠的数据上。
 
-@dataclass(frozen=True)
-class InsertResult:
-    attempted_count: int
-    inserted_count: int
-    dropped_count: int
-然后 BaseScraper.run() 汇总并返回：
+正确修复方式
+不要给当前 worker 共享对象简单加锁作为首选方案。
+更符合 Thin-Edge、也更容易测试的实现是：
 
-@dataclass(frozen=True)
-class RunReport:
-    target_table: str
-    extracted_count: int
-    backed_up_count: int
-    insert_result: InsertResult
-    failed_symbol_count: int
-    backup_path: str
-最后在 main 中：
+worker 只负责抓取，返回：
 
-inserted_count == 0 且 extracted_count > 0：Tier 2 + FAILED；
+symbol, records
+主线程在 future.result() 后，串行地：
 
-inserted_count != backed_up_count：调用 check_tier1_mismatch()；
+累加 extracted count；
 
-只有关键条件满足时才进入 Post-ETL 和 SUCCESS。
+写 JSONL；
 
-目前 AlertManager 已经具备 Tier 1 mismatch 函数，但 Gemini/Nemo 都未调用它。 
+累加 backup count；
 
-P1：云同步配置语义仍不一致
-当前 config 使用：
+将记录放�� DB buffer；
 
-oci:
-  enabled: true
+达到 batch size 后调用 insert_batch()；
 
-但 Gemini/Nemo 不读取该字段；它们只读取：
+合并 InsertResult。
 
-system.oci_par_url
+worker 线程不接触 BatchBackupContext、RunReport 和 DbOperator。
 
-config.env.oci.config_path
+这样可以保留 bounded in-flight 的内存优势，同时保证备份、审计和 DB 写入统计都是单线程、可重现的。
 
-找不到 URL 时仅记录 INFO 并返回成功。 
+P0：UploadManager 仍在调用已删除的旧 BackupManager API
+新的 BackupManager 已改成 batch 级方法：
 
-这将导致“配置显示已启用、实际没有上传”的危险假象。
+get_batch_dir(...)；
 
-推荐修复方式
-配置和代码统一成一种明确模型：
+start_batch(...)；
 
-oci:
-  enabled: true
-环境变量：
+clear_batch_dir(...)。 
 
-OCI_PAR_URL=https://objectstorage...
-配置对象：
+但 UploadManager 仍调用旧 API：
 
-@dataclass
-class OCIConfig:
-    enabled: bool = False
-    par_url: str = ""
-调度逻辑：
+get_task_dir(...)；
 
-oci.enabled	OCI_PAR_URL	行为
-false	任意	INFO：主动不启用同步。
-true	有效 URL	执行同步。
-true	缺失/非法	Tier 1 Warning；生产环境可选择拒绝启动。
-另外，建议废弃把 PAR URL 存入 OCI_CONFIG_PATH 的做法；该名字容易被理解为 OCI SDK 的 config 文件路径，而不是预认证上传 URL。
+clear_task_dir(...)。 
 
-P1：上传后仍然是“成功 PUT 即清理”，没有验证后清理
-当前 UploadManager 的流程是：
+这两个方法当前已不存在。只要未来完整 main.py 调用了 cloud sync，上传会抛出 AttributeError。如果主调度器遵循你之前设定的 Tier 1 云同步降级策略，该错误甚至可能只被记录为 warning，造成“云同步已配置但从未成功”的假象。
 
-压缩；
+正确修复方式
+将上传接口改为 batch 级别，例如：
 
-PUT；
+sync_to_cloud(
+    table_name=report.target_table,
+    batch_id=report.batch_id,
+    backup_path=report.backup_path,
+    manifest=manifest,
+)
+上传对象路径建议：
 
-raise_for_status() 成功；
+<ODS_TABLE>/<YYYY-MM-DD>/<BATCH_ID>/records.jsonl
+<ODS_TABLE>/<YYYY-MM-DD>/<BATCH_ID>/manifest.json
+清理的前提应当是：
 
-立即 clear_task_dir()。 
+records 文件上传成功；
 
-但设计要求是：上传和验证后，才清理本地文件。 
+manifest 上传成功；
 
-推荐修复方式
-建议采用 batch 级别的备份对象，而不是“table + day”级别：
+远端 checksum / content-length 校验通过；
 
-/home/ubuntu/backup/
-  ODS_PRICE_TICK/
-    2026-09-24/
-      <batch_id>/
-        records.jsonl
-        manifest.json
-manifest.json 至少记录：
+本地 backed_up_count == inserted_db_count；
 
-batch_id
+仅删除该 batch 的目录。
 
-table_name
-
-record_count
-
-SHA-256
-
-文件大小
-
-创建时间
-
-上传对象路径也按 batch 分隔：
-
-ODS_PRICE_TICK/2026-09-24/<batch_id>/records.jsonl
-ODS_PRICE_TICK/2026-09-24/<batch_id>/manifest.json
-然后：
-
-上传数据和 manifest；
-
-验证 HTTP 成功；
-
-验证远端对象或至少验证 checksum / content length；
-
-完成 DB count 对账；
-
-仅当上述步骤全部成功时清理此 batch 的本地目录；
-
-mismatch 或上传失败时必须保留本地文件。
-
-P1：内存问题已大幅改善，但并未完全收敛到 1GB 安全值
-bounded in-flight 已经解决了全量 future 堆积问题。 
-
-不过当前配置仍允许：
-
-price_ohlcv_pre.max_workers: 20；
-
-多个任务为 10 worker。 
-
-即使 Oracle pool 降为 5，20 个 HTTP worker、响应对象、JSON 解析和 backup 写入仍可能不适合 1GB VM。
-
-推荐值
-HTTP/API iterative scraper：max_workers: 2~4
-
-Selenium scraper：固定 max_workers: 1
-
-Oracle pool：当前 max=5 已显著改善；若真实负载不高，可以进一步评估 max=2~3
-
-max_in_flight：保持在 max_workers * 2 是合理的，但应加入配置上限，例如 max_in_flight <= 8
-
-建议的下一步:
-
-修改 DbOperator.insert_batch()，返回实际 attempted / inserted / dropped 计数。
-
-修改 BaseScraper，返回 RunReport。
-
-修改 BackupManager，用 batch 级 JSONL 文件替代按 symbol 覆盖式 .json 文件。
-
-在 main.py 调用 AlertManager.check_tier1_mismatch()。
-
-当写入为 0、失败比例超阈值、或数据缺失严重时，抛出异常、写 FAILED、发 Tier 2。
-
-将云端清理逻辑改为“上传 + 校验 + DB 对账成功后”执行。
-
-新增明确的 OCI_PAR_URL 环境变量；
-
-新增 oci.enabled 的代码读取；
-
-给“主动禁用”和“错误缺失配置”不同日志等级；
-
-写对应单元测试。
-
+当前 UploadManager 只要 PUT 返回成功就清理数据，这仍未达到“验证后清理”的目标。 

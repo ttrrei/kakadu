@@ -33,6 +33,7 @@ class RunReport:
     success_symbols: int = 0
     failed_symbols: int = 0
     backup_path: str = ""
+    manifest: Dict[str, Any] = field(default_factory=dict)
 
     def merge_insert_result(self, res: InsertResult):
         self.attempted_db_count += res.attempted_count
@@ -46,6 +47,11 @@ class BaseScraper(ABC):
     """
     Abstract Base Class for all scrapers.
     Implements the Template Method pattern to decouple orchestration from extraction.
+    
+    Concurrency Safety (P0 Fix):
+    - Workers ONLY return raw data (symbol, records, error).
+    - Main thread serializes: Backup Write -> Counting -> DB Buffer -> Flush.
+    - Selenium tasks forced to single-thread (effective_workers=1).
     """
 
     def __init__(self, db_op=db_operator, alert_mgr: AlertManager = alert_manager):
@@ -101,7 +107,7 @@ class BaseScraper(ABC):
             report.target_table = self.target_table
             logger.info(f"Starting job {job_name} on table {self.target_table} [Batch: {effective_batch_id}]...")
 
-            # ===== 开启 Batch 级备份上下文，全流程唯一数据文件 =====
+            # ===== Batch-level Backup Context (Single File per Batch) =====
             date_str = datetime.now().strftime("%Y-%m-%d")
             with self.backup_manager.start_batch(self.target_table, effective_batch_id, date_str) as batch_bak:
                 if self.is_bulk_task:
@@ -109,18 +115,18 @@ class BaseScraper(ABC):
                 else:
                     report = self._run_iterative(job_name, effective_batch_id, batch_bak, report)
 
-                # 确保 backup_path 在返回前被正确赋值
                 report.backup_path = batch_bak.batch_dir
 
-                # 显式 finalize，生成 manifest.json
+                # Explicit finalize to generate manifest.json
                 manifest = batch_bak.finalize()
+                report.manifest = manifest
                 logger.info(f"Backup finalized successfully: {manifest}")
 
             # =========================================================================
-            # P0 熔断决策与对账逻辑 (Adhering to main_review.txt & Review Guidelines)
+            # P0 Circuit Breaker & Tiered Alerting (Adhering to Review Guidelines)
             # =========================================================================
 
-            # 1. Tier 2 判定：有抽取但零入库 -> 严重系统性故障
+            # 1. Tier 2: Extracted > 0 but Inserted == 0 -> Systemic Failure
             if report.extracted_records_count > 0 and report.inserted_db_count == 0:
                 crit_msg = (
                     f"Tier 2 CRITICAL FAILURE in job '{job_name}' [{self.target_table}]: "
@@ -130,7 +136,7 @@ class BaseScraper(ABC):
                 self.alert_manager.send_tier2_alert(crit_msg, priority=1)
                 raise RuntimeError(crit_msg)
 
-            # 2. Tier 1 判定：本地真实落盘数 (backed_up_count) vs 实际入库条数不一致
+            # 2. Tier 1: Local Backup Count != DB Inserted Count
             if report.backed_up_count != report.inserted_db_count:
                 self.alert_manager.check_tier1_mismatch(
                     local_count=report.backed_up_count,
@@ -157,7 +163,7 @@ class BaseScraper(ABC):
         
         if not symbol_source:
             raise KeyError(
-                f"Configuration Error: 'symbol_source' is missing for scraper '{scraper_name}']."
+                f"Configuration Error: 'symbol_source' is missing for scraper '{scraper_name}'."
             )
             
         provider = SymbolProvider(source_table=symbol_source)
@@ -170,7 +176,7 @@ class BaseScraper(ABC):
         if data:
             report.extracted_records_count = len(data)
             
-            # 实时落盘备份 + 精准计数
+            # Real-time backup & precise counting (Single Thread)
             written = batch_bak.append_records(data)
             report.backed_up_count += written
             
@@ -187,33 +193,57 @@ class BaseScraper(ABC):
         
         driver = self.get_driver()
         symbols_gen = self._get_symbol_generator()
-        buffer = []
         
-        # 安全修复：Selenium Driver 不支持多线程共享，当需要 Driver 时强制单线程串行规避 Crash
+        # --- Concurrency Safety: Selenium forces Single Thread ---
         effective_workers = 1 if self.needs_driver else self.max_workers
+        if self.needs_driver and self.max_workers > 1:
+            logger.warning(f"Scraper '{getattr(self, 'scraper_name', 'unknown')}' uses Selenium. Forcing single-thread execution (max_workers=1).")
+
+        buffer: List[Dict[str, Any]] = []
+        
+        # Helper to flush buffer to DB
+        def flush_buffer():
+            nonlocal buffer
+            if buffer:
+                ins_result = self.db.insert_batch(self.target_table, buffer, batch_id=batch_id)
+                report.merge_insert_result(ins_result)
+                buffer = []
 
         if effective_workers == 1:
+            # --- Serial Execution (Selenium or Low Concurrency) ---
             for symbol in symbols_gen:
                 try:
-                    result = self._process_single_symbol(driver, symbol, batch_bak, report)
+                    result = self.scrape_one(driver, symbol)
                     if result:
                         records = result if isinstance(result, list) else [result]
-                        buffer.extend(records)
+                        report.extracted_records_count += len(records)
+                        report.success_symbols += 1
                         
+                        # Main Thread: Serial Backup Write
+                        written = batch_bak.append_records(records)
+                        report.backed_up_count += written
+                        
+                        # Main Thread: Buffer for DB
+                        buffer.extend(records)
                         if len(buffer) >= self.batch_size:
-                            ins_result = self.db.insert_batch(self.target_table, buffer, batch_id=batch_id)
-                            report.merge_insert_result(ins_result)
-                            buffer = [] 
+                            flush_buffer()
+                    else:
+                        # scrape_one returned None/Empty -> treat as symbol failure but continue
+                        report.failed_symbols += 1
+                        logger.warning(f"Symbol {symbol} returned no data.")
                 except Exception as e:
                     logger.error(f"Failed to process symbol {symbol}: {e}")
                     report.failed_symbols += 1
         else:
+            # --- Parallel Fetch / Serial Write Pattern (Thread Pool) ---
             max_in_flight = min(effective_workers * 2, self.config.get('system', {}).get('max_in_flight', 8))
+            
             with concurrent.futures.ThreadPoolExecutor(max_workers=effective_workers) as executor:
                 future_to_symbol = {}
                 
+                # Initial Submit
                 for symbol in symbols_gen:
-                    future = executor.submit(self._process_single_symbol, driver, symbol, batch_bak, report)
+                    future = executor.submit(self._safe_scrape_one, driver, symbol)
                     future_to_symbol[future] = symbol
                     if len(future_to_symbol) >= max_in_flight:
                         break
@@ -224,30 +254,43 @@ class BaseScraper(ABC):
                     for future in done:
                         symbol = future_to_symbol.pop(future)
                         try:
-                            result = future.result()
-                            if result:
-                                records = result if isinstance(result, list) else [result]
-                                buffer.extend(records)
+                            # Worker returns (symbol, records, error)
+                            # Main Thread handles ALL side effects
+                            _, records, error = future.result()
+                            
+                            if error:
+                                logger.error(f"Scrape error for {symbol}: {error}")
+                                report.failed_symbols += 1
+                            elif records:
+                                report.extracted_records_count += len(records)
+                                report.success_symbols += 1
                                 
+                                # Main Thread: Serial Backup Write
+                                written = batch_bak.append_records(records)
+                                report.backed_up_count += written
+                                
+                                # Main Thread: Buffer for DB
+                                buffer.extend(records)
                                 if len(buffer) >= self.batch_size:
-                                    ins_result = self.db.insert_batch(self.target_table, buffer, batch_id=batch_id)
-                                    report.merge_insert_result(ins_result)
-                                    buffer = [] 
+                                    flush_buffer()
+                            else:
+                                report.failed_symbols += 1
+                                logger.warning(f"Symbol {symbol} returned no data.")
                         except Exception as e:
-                            logger.error(f"Failed to process symbol {symbol}: {e}")
+                            logger.error(f"Unexpected future error for {symbol}: {e}")
                             report.failed_symbols += 1
 
+                    # Refill Pool
                     try:
                         while len(future_to_symbol) < max_in_flight:
                             next_symbol = next(symbols_gen)
-                            new_future = executor.submit(self._process_single_symbol, driver, next_symbol, batch_bak, report)
+                            new_future = executor.submit(self._safe_scrape_one, driver, next_symbol)
                             future_to_symbol[new_future] = next_symbol
                     except StopIteration:
                         pass
         
-        if buffer:
-            ins_result = self.db.insert_batch(self.target_table, buffer, batch_id=batch_id)
-            report.merge_insert_result(ins_result)
+        # Final Flush
+        flush_buffer()
 
         logger.info(
             f"Iterative run finished. Symbols Success: {report.success_symbols}, Failed: {report.failed_symbols} | "
@@ -263,21 +306,20 @@ class BaseScraper(ABC):
         report.backup_path = batch_bak.batch_dir
         return report
 
-    def _process_single_symbol(self, driver, symbol, batch_bak: BatchBackupContext, report: RunReport):
+    def _safe_scrape_one(self, driver, symbol) -> tuple[str, Optional[List[Dict]], Optional[Exception]]:
+        """
+        Wrapper for ThreadPoolExecutor.
+        Returns: (symbol, records_list_or_None, exception_or_None)
+        NEVER raises. All side effects (backup, db, counting) handled by caller (Main Thread).
+        """
         try:
             result = self.scrape_one(driver, symbol)
             if result:
                 records = result if isinstance(result, list) else [result]
-                report.extracted_records_count += len(records)
-                report.success_symbols += 1
-                
-                # 实时落盘到 records.jsonl 并累加真实 backed_up_count
-                written = batch_bak.append_records(records)
-                report.backed_up_count += written
-            return result
+                return symbol, records, None
+            return symbol, None, None
         except Exception as e:
-            logger.error(f"Scrape error for {symbol}: {e}")
-            raise e
+            return symbol, None, e
 
     @abstractmethod
     def scrape_all(self, driver: Optional[webdriver.Chrome], symbols: List[str]) -> List[Dict[str, Any]]: 

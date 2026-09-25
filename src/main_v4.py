@@ -17,11 +17,9 @@ Architecture Invariants (Red Lines):
 """
 
 import sys
-import os
 import uuid
 import argparse
 import logging
-from datetime import datetime
 from typing import Optional
 
 # --- Core Services (Singleton Instances) ---
@@ -120,29 +118,7 @@ def _sync_cloud_backup(target_table: str, batch_id: str) -> bool:
         upload_mgr = UploadManager(backup_manager=backup_mgr, oci_par_url=par_url)
         
         logger.info(f"Triggering cloud sync for table: {target_table} [Batch: {batch_id}]...")
-        # UploadManager.sync_to_cloud requires (table_name, batch_id, backup_path, manifest)
-        # backup_path & manifest are retrieved inside UploadManager via BackupManager using batch_id/date
-        # BUT: Our UploadManager.sync_to_cloud signature requires backup_path & manifest explicitly.
-        # We need to reconstruct the backup_path to call it.
-        # Pattern: /home/ubuntu/backup/{table_name}/{YYYY-MM-DD}/{batch_id}/
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        backup_path = os.path.join(backup_dir, target_table, date_str, batch_id)
-        
-        # We need the manifest. Since BatchBackupContext.finalize() wrote it, we read it back.
-        manifest_path = os.path.join(backup_path, "manifest.json")
-        if not os.path.exists(manifest_path):
-            raise FileNotFoundError(f"Manifest not found at {manifest_path}. Backup may be incomplete.")
-        
-        import json
-        with open(manifest_path, 'r', encoding='utf-8') as f:
-            manifest = json.load(f)
-
-        upload_mgr.sync_to_cloud(
-            table_name=target_table, 
-            batch_id=batch_id, 
-            backup_path=backup_path, 
-            manifest=manifest
-        )
+        upload_mgr.sync_to_cloud(table_name=target_table, batch_id=batch_id)
         logger.info(f"Cloud sync & verified cleanup successful for {target_table} [Batch: {batch_id}].")
         return True
     except Exception as e:
@@ -311,7 +287,7 @@ def build_parser() -> argparse.ArgumentParser:
 # =============================================================================
 # Main Entry Point
 # =============================================================================
-# ... existing code ...
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -345,17 +321,5 @@ def main() -> int:
     except SystemExit as e:
         exit_code = e.code if isinstance(e.code, int) else 1
     except Exception as e:
-        logger.critical(f"Unhandled critical exception in main: {e}", exc_info=True)
-        alert_manager.send_tier2_alert(f"Kakadu Orchestrator Crash: {e}")
-        exit_code = 1
-    finally:
-        try:
-            db_operator.close()
-            logger.debug("Database connection pool closed.")
-        except Exception as e:
-            logger.debug(f"DbOperator cleanup ignored: {e}")
-
-    return exit_code
-
-if __name__ == "__main__":
-    sys.exit(main())
+        logger.critical(f"Unhandled critical exception in main: {e}")
+        alert_manager.send_tier2_alert
