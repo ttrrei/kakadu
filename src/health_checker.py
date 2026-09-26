@@ -26,7 +26,7 @@ class StartupHealthChecker:
         wallet_path = self.config.env.database.wallet_path
         if not wallet_path or not Path(wallet_path).exists():
             raise RuntimeError(f"Critical Error: Oracle Wallet directory not found at: {wallet_path}")
-        logger.info("✓ Wallet directory verified.")
+        logger.info("Wallet directory verified.")
 
         # 2. Verify Essential DB Credentials
         db_cfg = self.config.env.database
@@ -37,7 +37,7 @@ class StartupHealthChecker:
 
         if missing_creds:
             raise RuntimeError(f"Critical Error: Missing required DB credentials in .env: {', '.join(missing_creds)}")
-        logger.info("✓ DB credentials verified.")
+        logger.info("DB credentials verified.")
 
         # 3. Real Database Probe (The "Truth" Test)
         # We use SymbolProvider to verify the entire connection chain (Thin Mode -> Wallet -> DB)
@@ -60,7 +60,7 @@ class StartupHealthChecker:
             gen = provider.get_target_symbols()
             try:
                 next(gen)
-                logger.info("✓ Database probe successful: Connection established and query executed.")
+                logger.info("Database probe successful: Connection established and query executed.")
             except StopIteration:
                 logger.warning("Database connected, but the symbol source table is empty.")
             

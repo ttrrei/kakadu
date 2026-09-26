@@ -5,90 +5,148 @@ import logging
 import zipfile
 import requests
 from datetime import datetime
-from typing import Optional
+from typing import Dict, Any, Optional
 from src.backup_manager import BackupManager
 
 logger = logging.getLogger(__name__)
 
 class UploadManager:
     """
-    UploadManager handles the Cloud Synchronization lifecycle.
+    UploadManager handles the Cloud Synchronization lifecycle (Batch Level).
     
-    Design Principles:
-    1. Batch-Compress-Upload: Reduces network overhead by uploading one ZIP per task.
+    Design Principles (P0 Fix & ADR-013/014):
+    1. Batch-Level Sync: Compresses and uploads a single ZIP per batch_id.
     2. OCI PAR Integration: Uses Pre-Authenticated Requests for stateless, secure uploads.
-    3. Post-Verification Cleanup: Only purges local data after successful HTTP 200 response.
+    3. Verify-Then-Purge: Only deletes the local batch directory after ZIP upload succeeds.
+    4. Zip Compression: Reduces storage cost and network transfer time.
+    5. Tier-1 Retention Policy: If allow_local_purge=False (Tier-1 mismatch), 
+       uploads ZIP to cloud for offsite copy BUT retains local directory for forensics/replay.
     """
 
     def __init__(self, backup_manager: BackupManager, oci_par_url: str):
         """
-        :param backup_manager: Instance of BackupManager to coordinate paths and cleanup.
+        :param backup_manager: Instance of BackupManager to coordinate local cleanup.
         :param oci_par_url: The base OCI PAR URL for the bucket.
         """
         self.backup_manager = backup_manager
-        self.oci_par_url = oci_par_url.rstrip('/')
+        # Ensure trailing slash for URL joining
+        self.oci_par_url = oci_par_url.rstrip('/') + '/'
 
-    def _create_zip_archive(self, table_name: str, date_str: str) -> str:
+    def _create_zip_archive(self, batch_dir: str, table_name: str, batch_id: str) -> str:
         """
-        Compresses the entire task directory into a single ZIP file.
+        Compresses the entire batch directory into a single ZIP file in the parent directory.
+        Returns the path to the created ZIP file.
         """
-        task_dir = self.backup_manager.get_task_dir(table_name, date_str)
+        # Zip stored in parent of batch_dir (e.g., /home/ubuntu/backup/ODS_TABLE/2026-09-15/)
+        parent_dir = os.path.dirname(batch_dir)
         timestamp = datetime.now().strftime("%H%M%S")
-        zip_filename = f"{table_name}_{date_str}_{timestamp}.zip"
-        zip_path = os.path.join(os.path.dirname(task_dir), zip_filename)
+        zip_filename = f"{table_name}_{batch_id}_{timestamp}.zip"
+        zip_path = os.path.join(parent_dir, zip_filename)
 
         try:
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                for root, dirs, files in os.walk(task_dir):
+                for root, dirs, files in os.walk(batch_dir):
                     for file in files:
                         if not file.startswith('.'): 
                             full_path = os.path.join(root, file)
-                            arcname = os.path.relpath(full_path, task_dir)
+                            # Archive name: batch_id/records.jsonl, batch_id/manifest.json
+                            arcname = os.path.join(batch_id, os.path.relpath(full_path, batch_dir))
                             zipf.write(full_path, arcname)
             
-            logger.info(f"Created compressed archive: {zip_path}")
+            logger.info(f"Created compressed archive: {zip_path} ({os.path.getsize(zip_path)} bytes)")
             return zip_path
         except Exception as e:
-            logger.error(f"Failed to create ZIP archive for {table_name}: {e}")
+            logger.error(f"Failed to create ZIP archive for {batch_id}: {e}")
             raise
 
-    def sync_to_cloud(self, table_name: str, date_str: Optional[str] = None):
+    def sync_to_cloud(
+        self, 
+        table_name: str, 
+        batch_id: str, 
+        backup_path: str, 
+        manifest: Dict[str, Any],
+        allow_local_purge: bool = True   # 👈 新增参数：默认 True 保持向后兼容
+    ) -> bool:
         """
-        Executes the full sync lifecycle: Compress -> Upload -> Purge.
+        Executes the full sync lifecycle for a single batch:
+        1. Compress batch directory to ZIP
+        2. Upload ZIP to OCI Object Storage via PAR (PUT)
+        3. Verify upload success (HTTP 2xx)
+        4. **Conditionally** purge local batch directory (controlled by allow_local_purge)
+        5. Cleanup temporary ZIP file
+        
+        Failure at any step raises Exception -> Caller (main.py) treats as Tier-1 Warning & Retains Local Data.
+        
+        :param table_name: ODS Table name (e.g., ODS_PRICE_OHLCV)
+        :param batch_id: UUID batch identifier
+        :param backup_path: Full local path to the batch directory 
+                            (e.g., /home/ubuntu/backup/ODS_PRICE_OHLCV/2026-09-15/abc123/)
+        :param manifest: The manifest dict returned by BatchBackupContext.finalize()
+        :param allow_local_purge: If False (Tier-1 mismatch), SKIP local deletion. 
+                                  ZIP still uploaded to cloud for offsite redundancy.
+        :return: True if sync successful.
         """
-        if date_str is None:
+        if not os.path.isdir(backup_path):
+            raise NotADirectoryError(f"Backup path does not exist: {backup_path}")
+
+        # Extract Date Str from backup_path for object prefix
+        # Path pattern: .../backup/{table_name}/{YYYY-MM-DD}/{batch_id}/
+        try:
+            date_str = os.path.basename(os.path.dirname(backup_path))
+            # Validate date format roughly
+            if len(date_str) != 10 or date_str.count('-') != 2:
+                date_str = datetime.now().strftime("%Y-%m-%d")
+        except Exception:
             date_str = datetime.now().strftime("%Y-%m-%d")
 
         zip_path = None
         try:
             # 1. Compress
-            zip_path = self._create_zip_archive(table_name, date_str)
+            zip_path = self._create_zip_archive(backup_path, table_name, batch_id)
             
-            # 2. Construct OCI Path (Per ADR-013: {TABLE}/{DATE}/{FILE})
-            # Example: /home/ubuntu/backup/ODS_PRICE_OHLCV/2026-08-29/120000.zip
-            filename = os.path.basename(zip_path)
-            cloud_path = f"{table_name}/{date_str}/{filename}"
-            full_upload_url = f"{self.oci_par_url}/{cloud_path}"
+            # 2. Construct OCI Object Path (ADR-013): {TABLE}/{YYYY-MM-DD}/{ZIP_FILENAME}
+            # Example: ODS_PRICE_OHLCV/2026-09-15/ODS_PRICE_OHLCV_abc123_120000.zip
+            zip_filename = os.path.basename(zip_path)
+            cloud_object_path = f"{table_name}/{date_str}/{zip_filename}"
+            full_upload_url = f"{self.oci_par_url}{cloud_object_path}"
 
-            # 3. Upload via PUT request (OCI PAR standard)
-            logger.info(f"Uploading {filename} to OCI Object Storage...")
+            # 3. Upload ZIP via PUT (Streaming to save RAM)
+            logger.info(f"Uploading {zip_filename} to OCI Object Storage: {cloud_object_path}")
+            file_size = os.path.getsize(zip_path)
             with open(zip_path, 'rb') as f:
-                response = requests.put(full_upload_url, data=f, timeout=300)
+                response = requests.put(
+                    full_upload_url, 
+                    data=f, 
+                    timeout=300,  # 5 min timeout
+                    headers={'Content-Length': str(file_size)}
+                )
                 response.raise_for_status()
 
-            logger.info(f"Successfully uploaded to OCI: {cloud_path}")
+            logger.info(f"Successfully uploaded batch {batch_id} to OCI: {cloud_object_path}")
 
-            # 4. Purge local data ONLY after successful upload
-            self.backup_manager.clear_task_dir(table_name, date_str)
+            # 4. Conditional Local Purge (Core P0-2 Fix)
+            if allow_local_purge:
+                # Normal flow: Upload verified -> Purge local
+                self.backup_manager.clear_batch_dir(table_name, batch_id, date_str)
+                logger.info(f"Local batch directory purged: {backup_path}")
+            else:
+                # Tier-1 Policy: Upload succeeded BUT local mismatch detected -> RETAIN local
+                logger.warning(
+                    f"[TIER-1 POLICY] Local backup RETAINED for {table_name}/{batch_id} "
+                    f"(allow_local_purge=False). Cloud copy exists at: {cloud_object_path}"
+                )
+            
+            return True
 
         except Exception as e:
-            logger.error(f"Cloud sync failed for {table_name}: {e}")
-            # We do NOT purge local data here, allowing for retry in the next run
+            logger.error(f"Cloud sync failed for batch {batch_id}: {e}")
+            # Re-raise to let main.py handle Tier-1 Warning & Retention
             raise
         finally:
-            # Always remove the temporary ZIP file
+            # 5. Always cleanup temporary ZIP file (never leave zip on disk)
             if zip_path and os.path.exists(zip_path):
                 try:
                     os.remove(zip_path)
+                    logger.debug(f"Removed temporary zip: {zip_path}")
                 except Exception as e:
                     logger.warning(f"Could not remove temporary ZIP {zip_path}: {e}")
