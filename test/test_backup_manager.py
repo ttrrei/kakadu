@@ -1,82 +1,78 @@
-# test/test_backup_manager.py
+# test/test_backup_manager_v2.py
 import os
 import json
 import shutil
 import logging
 import sys
+from pathlib import Path
 
-# 确保 src 目录在路径中
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.backup_manager import BackupManager
 
-# 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def test_backup_manager():
-    """
-    Comprehensive test for New BackupManager:
-    1. Atomic local persistence (One file per symbol)
-    2. Directory structure (root/table/date/symbol.json)
-    3. Data integrity validation
-    4. Cleanup functionality
-    """
-    # 使用测试目录
-    test_root = "/home/ubuntu/backup_test"
+def test_backup_manager_v2():
+    # 使用跨平台路径
+    test_root = os.path.join(os.path.expanduser("~"), "kakadu_backup_test")
     bm = BackupManager(base_backup_dir=test_root)
     
     table_name = "TEST_TABLE"
-    test_symbols = {
-        "CBA": {"PRICE": "100.5", "TIME": "2023-10-01 10:00"},
-        "BHP": {"PRICE": "45.2", "TIME": "2023-10-01 10:00"},
-    }
+    batch_id = "test-batch-123"
+    test_data = [
+        {"CODE": "CBA.AX", "PRICE": "100.5"},
+        {"CODE": "BHP.AX", "PRICE": "45.2"},
+    ]
 
     try:
-        logger.info("--- Starting BackupManager Test ---")
+        logger.info("--- Starting New BackupManager V2 Test ---")
 
-        # 1. 测试正常保存 (Atomic Write)
-        logger.info("Test 1: Saving records per symbol...")
-        for symbol, data in test_symbols.items():
-            bm.save_record(table_name, symbol, data)
-        
-        # 验证目录结构
-        task_dir = bm.get_task_dir(table_name)
-        if not os.path.exists(task_dir):
-            logger.error("❌ FAILED: Task directory was not created.")
+        # 1. 测试上下文管理器链路
+        logger.info("Test 1: Testing BatchBackupContext lifecycle...")
+        with bm.start_batch(table_name, batch_id) as ctx:
+            written = ctx.append_records(test_data)
+            logger.info(f"Written {written} records to JSONL")
+            
+            # 验证文件是否立即生成
+            if not os.path.exists(ctx.records_path):
+                logger.error("❌ FAILED: records.jsonl not created")
+                return
+
+            # 执行 finalize 生成 manifest
+            manifest = ctx.finalize()
+            logger.info(f"Manifest generated: {manifest['checksum_sha256'][:10]}...")
+
+        # 2. 验证 Manifest 内容
+        logger.info("Test 2: Validating manifest.json...")
+        with open(ctx.manifest_path, 'r') as f:
+            m_data = json.load(f)
+            if m_data['record_count'] != 2:
+                logger.error(f"❌ FAILED: Record count mismatch. Expected 2, got {m_data['record_count']}")
+                return
+
+        # 3. 验证目录结构 (table/date/batch_id)
+        logger.info("Test 3: Verifying directory structure...")
+        expected_dir = bm.get_batch_dir(table_name, batch_id)
+        if not os.path.exists(expected_dir):
+            logger.error("❌ FAILED: Directory structure is incorrect")
             return
 
-        # 2. 验证文件存在与内容
-        logger.info("Test 2: Validating file content...")
-        for symbol, expected_data in test_symbols.items():
-            file_path = os.path.join(task_dir, f"{symbol}.json")
-            if not os.path.exists(file_path):
-                logger.error(f"❌ FAILED: File for {symbol} not found.")
-                return
-            
-            with open(file_path, 'r', encoding='utf-8') as f:
-                actual_data = json.load(f)
-                if actual_data != expected_data:
-                    logger.error(f"❌ FAILED: Data mismatch for {symbol}.")
-                    return
-        logger.info("✅ SUCCESS: All records saved correctly in JSON format.")
+        # 4. 测试清理功能
+        logger.info("Test 4: Testing clear_batch_dir...")
+        bm.clear_batch_dir(table_name, batch_id)
+        if os.path.exists(expected_dir):
+            logger.error("❌ FAILED: Batch directory not purged")
+            return
 
-        # 3. 测试清理功能
-        logger.info("Test 3: Testing clear_task_dir...")
-        bm.clear_task_dir(table_name)
-        if not os.path.exists(task_dir):
-            logger.info("✅ SUCCESS: Local task directory purged successfully.")
-        else:
-            logger.error("❌ FAILED: Directory still exists after purge.")
-
-        logger.info("--- ALL BACKUP MANAGER TESTS PASSED ---")
+        logger.info("✅ ALL BACKUP MANAGER V2 TESTS PASSED")
 
     except Exception as e:
-        logger.error(f"❌ CRITICAL FAILURE during test: {e}")
+        logger.error(f"❌ CRITICAL FAILURE: {e}")
     finally:
         if os.path.exists(test_root):
             shutil.rmtree(test_root)
-            logger.info(f"Cleaned up test directory {test_root}")
+            logger.info(f"Cleaned up {test_root}")
 
 if __name__ == "__main__":
-    test_backup_manager()
+    test_backup_manager_v2()
