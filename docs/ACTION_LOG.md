@@ -732,3 +732,29 @@ As the system moves from raw data ingestion (ODS) to quantitative analysis (BDI/
   - ODS Cleaning & Deduplication Procedures
   - Technical Indicator Calculation (EMA, PSAR, Supertrend)
   - Analytics Views (e.g., `VW_TRADING_SIGNALS`)
+
+
+## 6. Certification Benchmarks (Truth-Based Verification)
+
+### 6.1 Foundation Layer Certification
+Verified on [Date]: 2026-09-26
+- **DbOperator**: ✅ Passed (Bulk Insert, Fallback Mechanism, Audit Injection, SP Trigger)
+- **BackupManager**: ✅ Passed (BatchContext, fsync, manifest.json, Purge)
+- **UploadManager**: ✅ Passed (Zip Compression, OCI PAR URL Prefixing, Cloud Sync)
+- **HealthChecker**: ✅ Passed (Wallet Probe, Credential Validation, DB Connectivity)
+- **AlertManager**: ✅ Passed (Tier 1 Warning, Tier 2 Pushover Notification, Network Shielding)
+- **ConfigManager**: ✅ Passed (Dual-file loading, Hierarchical Resolution)
+
+### 6.2 Scraper Layer Certification
+Verified on [Date]: 2026-09-26
+- **company_master**: ✅ Passed (Bulk Mode, CSV API)
+- **price_ohlcv (Pre/Post)**: ✅ Passed (Iterative Mode, Concurrent Fetching, Buffer Flushing)
+- **short**: ✅ Passed (Bulk Mode, CSV API)
+- **analyst_consensus**: ✅ Passed (Iterative Mode, Dual-Table Write, No-Data Handling)
+- **annc**: ✅ Passed (Selenium, Error Recovery from Page Failures, Process Cleanup)
+- **afr**: ✅ Passed (Iterative Mode, High-Volume Tick Data)
+
+### 6.3 Orchestration Layer Certification
+Verified on [Date]: 2026-09-26
+- **main.py**: ✅ Passed (3-Tier CLI, Health $\rightarrow$ Scrape $\rightarrow$ Sync $\rightarrow$ Audit flow)
+- **DbTransformer**: ✅ Passed (Sequential SP Execution, Fail-Fast Halt)
