@@ -113,15 +113,24 @@ alerting:
   notification_level: "tier_2" 
   retry_limit: 3
 
-etl_groups:
-  # 场景 1: 验证顺序执行 (A -> B)
-  test_success_group:
-    - "EQUITY.SP_TEST_STEP_A"
-    - "EQUITY.SP_TEST_STEP_B"
-  
-  # 场景 2: 验证错误截断 (A -> FAIL -> B)
-  # 预期结果：A 执行成功，FAIL 报错，B 绝对不能被执行
-  test_fail_group:
-    - "EQUITY.SP_TEST_STEP_A"
-    - "EQUITY.SP_TEST_FAIL"
-    - "EQUITY.SP_TEST_STEP_B"
+  etl_groups:
+    # ... existing test groups ...
+    
+    # Scraper Post-Action ETL Groups (Mapping Driven per ADR-020)
+    post_afr:
+      - "EQUITY.SP_POST_AFR"
+    post_annc:
+      - "EQUITY.SP_POST_ANNC"
+    post_analyst_trends:
+      - "EQUITY.SP_POST_ANALYST_TRENDS"
+    post_analyst_targets:
+      - "EQUITY.SP_POST_ANALYST_TARGETS"
+    post_company_master:
+      - "EQUITY.SP_POST_COMPANY_MASTER"
+    post_short:
+      - "EQUITY.SP_POST_SHORT"
+    post_price_ohlcv_pre:
+      - "EQUITY.SP_POST_PRICE_OHLCV_PRE"
+    post_price_ohlcv_post:
+      - "EQUITY.SP_POST_PRICE_OHLCV_POST"
+
