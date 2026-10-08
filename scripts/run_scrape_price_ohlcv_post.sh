@@ -12,7 +12,7 @@ cd "$PROJECT_DIR"
 source .venv/bin/activate
 
 TASK_NAME="price_ohlcv_post"
-TRANSFORM_GROUP="price_ohlcv_pipeline" # 对应 config.yaml 中的 etl_groups
+TRANSFORM_GROUP="post_price_ohlcv_post" # 对应 config.yaml 中的 etl_groups
 LOG_DIR="$PROJECT_DIR/logs"
 mkdir -p "$LOG_DIR"
 

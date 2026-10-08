@@ -12,7 +12,7 @@ cd "$PROJECT_DIR"
 source .venv/bin/activate
 
 TASK_NAME="afr"
-TRANSFORM_GROUP="afr_pipeline" # 对应 config.yaml 中的 etl_groups
+TRANSFORM_GROUP="post_afr" # 对应 config.yaml 中的 etl_groups
 LOG_DIR="$PROJECT_DIR/logs"
 mkdir -p "$LOG_DIR"
 

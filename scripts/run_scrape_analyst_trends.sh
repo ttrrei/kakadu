@@ -9,7 +9,7 @@ cd "$PROJECT_DIR"
 source .venv/bin/activate
 
 TASK_NAME="analyst_trends"
-TRANSFORM_GROUP="analyst_trends_pipeline"
+TRANSFORM_GROUP="post_analyst_trends"
 LOG_DIR="$PROJECT_DIR/logs"
 mkdir -p "$LOG_DIR"
 

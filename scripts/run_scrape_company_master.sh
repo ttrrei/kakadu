@@ -12,7 +12,7 @@ cd "$PROJECT_DIR"
 source .venv/bin/activate
 
 TASK_NAME="company_master"
-TRANSFORM_GROUP="company_master_pipeline" # 对应 config.yaml 中配置的清洗存储过程组
+TRANSFORM_GROUP="post_company_master" # 对应 config.yaml 中配置的清洗存储过程组
 LOG_DIR="$PROJECT_DIR/logs"
 mkdir -p "$LOG_DIR"
 
