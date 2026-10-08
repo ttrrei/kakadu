@@ -64,14 +64,10 @@ class YahooBase(BaseScraper):
             
             extracted_records = []
             for i, ts in enumerate(timestamps):
-                # Data Quality Filter: Only keep records exactly on the hour for 1h interval
-                # This solves the common Yahoo API offset problem
-                if self.interval == "1h" and ts % 3600 != 0:
-                    continue
+                # Data Quality filters removed: All raw timestamps and prices 
+                # are now preserved and pushed to the database for downstream cleaning.
                 
                 close_price = quotes['close'][i]
-                if close_price is None:
-                    continue
                 
                 # Map to ODS structure. All values coerced to string for VARCHAR2 storage.
                 extracted_records.append({
@@ -80,7 +76,7 @@ class YahooBase(BaseScraper):
                     "OPEN_PRICE": str(quotes['open'][i]) if quotes['open'][i] is not None else None,
                     "HIGH_PRICE": str(quotes['high'][i]) if quotes['high'][i] is not None else None,
                     "LOW_PRICE": str(quotes['low'][i]) if quotes['low'][i] is not None else None,
-                    "CLOSE_PRICE": str(close_price),
+                    "CLOSE_PRICE": str(close_price) if close_price is not None else None,
                     "VOLUME": str(quotes['volume'][i]) if quotes['volume'][i] is not None else None
                 })
             
