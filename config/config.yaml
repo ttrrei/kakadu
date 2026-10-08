@@ -47,7 +47,7 @@ price_ohlcv_pre:
 # Extractor #1b: OHLCV Post-Close
 price_ohlcv_post:
   base_url: "https://query2.finance.yahoo.com/v8/finance/chart/"
-  symbol_source: "EQUITY.VW_TOP_100_COMPANIES" # DB View
+  symbol_source: "EQUITY.VW_OHLCV_POST_LOAD_LIST" # DB View
   target_table: "ODS_PRICE_OHLCV_POST"
   is_bulk: false
   needs_driver: false

@@ -495,3 +495,60 @@ BEGIN
   NULL;
 END SP_POST_PRICE_OHLCV_POST;
 /
+
+
+
+-- =============================================================================
+-- View: EQUITY.VW_CURRENT_COMPANY (Latest Company Master State)
+-- =============================================================================
+BEGIN
+  EXECUTE IMMEDIATE '
+    CREATE OR REPLACE VIEW EQUITY.VW_CURRENT_COMPANY AS 
+    WITH TEMP AS (
+      SELECT CODE, COMPANY_NAME, SECTOR
+           , CASE WHEN MARKET_CAP IS NULL THEN ''0'' ELSE MARKET_CAP END AS MARKET_CAP
+           , ROW_NUMBER() OVER (PARTITION BY CODE ORDER BY TO_TIMESTAMP_TZ(LOAD_TIME, ''YYYY-MM-DD"T"HH24:MI:SS.FF6TZH:TZM'') DESC) AS RN
+      FROM EQUITY.ODS_COMPANY_MASTER
+      WHERE TO_TIMESTAMP_TZ(LOAD_TIME, ''YYYY-MM-DD"T"HH24:MI:SS.FF6TZH:TZM'') > CURRENT_TIMESTAMP - INTERVAL ''180'' DAY(3)
+    )
+    SELECT CODE, COMPANY_NAME, SECTOR, MARKET_CAP
+    FROM TEMP WHERE RN = 1 ORDER BY CODE
+  ';
+  DBMS_OUTPUT.PUT_LINE('View EQUITY.VW_CURRENT_COMPANY created successfully.');
+EXCEPTION
+  WHEN OTHERS THEN
+    DBMS_OUTPUT.PUT_LINE('Error creating view EQUITY.VW_CURRENT_COMPANY: ' || SQLERRM);
+    RAISE;
+END;
+/
+
+-- =============================================================================
+-- View: EQUITY.VW_OHLCV_POST_LOAD_LIST (Remaining symbols to fetch today)
+-- =============================================================================
+BEGIN
+  EXECUTE IMMEDIATE '
+    CREATE OR REPLACE VIEW EQUITY.VW_OHLCV_POST_LOAD_LIST AS 
+    WITH TEMP AS (
+      SELECT REGEXP_REPLACE(CODE, ''\.[Aa][Xx]$'', '''') AS CODE
+      FROM EQUITY.ODS_PRICE_OHLCV_POST
+      WHERE CLOSE_PRICE IS NOT NULL
+        AND TO_CHAR(CAST(RECORD_DTS AS TIMESTAMP WITH LOCAL TIME ZONE) AT TIME ZONE ''Australia/Sydney'', ''YYYY-MM-DD'')
+            = TO_CHAR(CAST(CURRENT_TIMESTAMP AT TIME ZONE ''Australia/Sydney'' AS TIMESTAMP), ''YYYY-MM-DD'')
+        AND TO_CHAR(CAST(FROM_TZ(CAST(DATE ''1970-01-01'' + (CAST(RAW_TIMESTAMP AS NUMBER) / 86400) AS TIMESTAMP), ''UTC'') 
+            AT TIME ZONE ''Australia/Sydney'' AS TIMESTAMP), ''YYYY-MM-DD'') 
+            = TO_CHAR(CAST(CURRENT_TIMESTAMP AT TIME ZONE ''Australia/Sydney'' AS TIMESTAMP), ''YYYY-MM-DD'')
+        AND TO_CHAR(CAST(FROM_TZ(CAST(DATE ''1970-01-01'' + (CAST(RAW_TIMESTAMP AS NUMBER) / 86400) AS TIMESTAMP), ''UTC'') 
+            AT TIME ZONE ''Australia/Sydney'' AS TIMESTAMP), ''HH24:MI:SS'') 
+            = ''16:00:00''
+      GROUP BY REGEXP_REPLACE(CODE, ''\.[Aa][Xx]$'', '''')
+    ) 
+    SELECT CODE FROM EQUITY.VW_CURRENT_COMPANY
+    WHERE CODE NOT IN (SELECT CODE FROM TEMP)
+  ';
+  DBMS_OUTPUT.PUT_LINE('View EQUITY.VW_OHLCV_POST_LOAD_LIST created successfully.');
+EXCEPTION
+  WHEN OTHERS THEN
+    DBMS_OUTPUT.PUT_LINE('Error creating view EQUITY.VW_OHLCV_POST_LOAD_LIST: ' || SQLERRM);
+    RAISE;
+END;
+/
