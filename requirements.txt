@@ -17,6 +17,7 @@ oci==2.128.0
 beautifulsoup4==4.15.0
 yfinance==1.4.1
 pandas==3.0.3
+lxml==5.2.2
 
 # --- Selenium collectors (annc / list / consensus) ---
 selenium==4.45.0
