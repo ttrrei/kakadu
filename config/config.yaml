@@ -42,7 +42,7 @@ price_ohlcv_pre:
   batch_size: 50
   max_workers: 20
   interval: "1h"
-  range: "1d"
+  range: "2d"
 
 # Extractor #1b: OHLCV Post-Close
 price_ohlcv_post:
@@ -53,8 +53,8 @@ price_ohlcv_post:
   needs_driver: false
   batch_size: 50
   max_workers: 10
-  interval: "1h"
-  range: "3d"
+  interval: "1d"
+  range: "5d"
 
 # Extractor #2: AFR Quote & Tick (Now Tick only)
 afr:
